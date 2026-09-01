@@ -15,3 +15,6 @@ xcuserdata/
 
 # marp-engine-build: npm deps (reproducible via `npm install`)
 marp-engine-build/node_modules/
+
+# Scratch output from shell/theme extraction experiments
+marp-engine-build/assembled_theme_test.html

@@ -13,20 +13,35 @@ targets:
       - path: imarp/Resources
         excludes:
           - "Deck/**"
+          - "MarpEngine/**"
       - path: imarp/Resources/Deck
+        type: folder
+        buildPhase: resources
+      - path: imarp/Resources/MarpEngine
         type: folder
         buildPhase: resources
     info:
       path: imarp/Resources/Info.plist
       properties:
         UILaunchScreen: {}
+        # Deliberately NOT setting UIRequiresFullScreen. It marks the app as
+        # single-window / no-multitasking on iPadOS, which contradicts
+        # UIApplicationSupportsMultipleScenes below — and the external display
+        # only ever reaches us as a *second scene*, so anything that tells the
+        # system we don't do multiple scenes kills that path.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
           UISceneConfigurations:
             UIWindowSceneSessionRoleApplication:
               - UISceneConfigurationName: Default Configuration
                 UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
-            UIWindowSceneSessionRoleExternalDisplay:
+            # NOT UIWindowSceneSessionRoleExternalDisplay — that role is for
+            # interactive external displays. A plain non-touch HDMI monitor
+            # connects with role windowExternalDisplayNonInteractive; the
+            # wrong role here means iPadOS never offers us this scene at
+            # all and just falls back to plain screen mirroring, which is
+            # exactly the bug this fixes.
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
               - UISceneConfigurationName: External Display Configuration
                 UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate
         UISupportedInterfaceOrientations:

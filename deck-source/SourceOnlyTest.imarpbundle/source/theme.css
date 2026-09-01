@@ -1,0 +1,48 @@
+/*!
+ * @theme imarp-test
+ */
+
+@font-face {
+    font-family: 'Lobster';
+    src: url('assets/Lobster-Regular.ttf') format('truetype');
+}
+
+:root {
+    --imarp-bg: #10131a;
+    --imarp-fg: #f4f1ea;
+    --imarp-accent: #ffb43c;
+    --imarp-accent2: #59c1bd;
+}
+
+section {
+    background-color: var(--imarp-bg);
+    color: var(--imarp-fg);
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    padding: 60px;
+}
+
+section h1 {
+    font-family: 'Lobster', cursive;
+    color: var(--imarp-accent);
+    font-size: 2.6em;
+}
+
+section h2 {
+    color: var(--imarp-accent2);
+}
+
+section strong {
+    color: var(--imarp-accent);
+}
+
+section a {
+    color: var(--imarp-accent2);
+}
+
+section.title {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+}

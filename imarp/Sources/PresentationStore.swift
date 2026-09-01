@@ -42,6 +42,13 @@ final class PresentationStore {
     private(set) var deckDirectory: URL
     private(set) var slideCount: Int
 
+    /// Slide width÷height for the loaded deck, and the size of the canvas the
+    /// presenter actually draws on. Together these let the external display
+    /// map ink from the iPad's slide rect onto its own — see
+    /// `SlideCanvasView.setDrawing(_:authoredOnCanvasOfSize:aspectRatio:)`.
+    private(set) var slideAspectRatio: CGFloat = 16.0 / 9.0
+    private(set) var authoringCanvasSize: CGSize = .zero
+
     /// Updated by the main scene once its step completes. Used only to
     /// attribute freshly-drawn ink to the right slide — the external
     /// display tracks its own current index locally, since it steps its
@@ -61,13 +68,16 @@ final class PresentationStore {
         }
         deckHTMLURL = url
         deckDirectory = url.deletingLastPathComponent()
-        slideCount = 6
+        let html = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        slideCount = MarpBundleLoader.slideCount(in: html)
+        slideAspectRatio = MarpBundleLoader.slideAspectRatio(in: html)
     }
 
-    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int) {
+    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int, slideAspectRatio: CGFloat) {
         deckHTMLURL = htmlURL
         deckDirectory = directory
         self.slideCount = slideCount
+        self.slideAspectRatio = slideAspectRatio
         currentIndex = 0
         drawings = [:]
         NotificationCenter.default.post(name: .deckDidChange, object: nil)
@@ -84,6 +94,12 @@ final class PresentationStore {
             object: nil,
             userInfo: ["slideIndex": slideIndex]
         )
+    }
+
+    /// Recorded by the main scene whenever its canvas lays out, so ink can be
+    /// rescaled for the external display's differently-sized canvas.
+    func setAuthoringCanvasSize(_ size: CGSize) {
+        authoringCanvasSize = size
     }
 
     func setCurrentIndex(_ index: Int) {

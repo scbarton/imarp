@@ -131,7 +131,10 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         contentView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.backgroundColor = .clear
-        canvasView.drawingPolicy = .anyInput
+        // .anyInput would always allow finger drawing regardless of the
+        // user's system-wide "Only Draw with Apple Pencil" setting; .default
+        // respects that setting like other PencilKit apps do.
+        canvasView.drawingPolicy = .default
         canvasView.delegate = self
 
         addSubview(contentView)
@@ -157,6 +160,45 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     func configure(slideIndex: Int, drawing: PKDrawing) {
         contentView.showSlide(index: slideIndex)
         setDrawing(drawing)
+    }
+
+    /// Where the slide itself sits inside `size` once letterboxed to preserve
+    /// `aspectRatio` — the webview scales the slide to fit and centers it, so
+    /// on a 4:3-ish iPad canvas a 16:9 slide leaves bars above and below,
+    /// while on a 16:9 TV it fills the screen.
+    static func slideRect(in size: CGSize, aspectRatio: CGFloat) -> CGRect {
+        guard size.width > 0, size.height > 0, aspectRatio > 0 else { return .zero }
+        let fitted: CGSize
+        if size.width / size.height > aspectRatio {
+            fitted = CGSize(width: size.height * aspectRatio, height: size.height)
+        } else {
+            fitted = CGSize(width: size.width, height: size.width / aspectRatio)
+        }
+        return CGRect(
+            x: (size.width - fitted.width) / 2,
+            y: (size.height - fitted.height) / 2,
+            width: fitted.width,
+            height: fitted.height
+        )
+    }
+
+    /// Displays ink drawn on a different-sized canvas. Ink is stored in the
+    /// authoring canvas's points, so putting it on the larger external canvas
+    /// unchanged leaves it clustered in one corner at the wrong scale; this
+    /// maps the source slide rect onto this canvas's slide rect so a stroke
+    /// stays over the same part of the slide on both screens.
+    func setDrawing(_ drawing: PKDrawing, authoredOnCanvasOfSize sourceSize: CGSize, aspectRatio: CGFloat) {
+        let source = Self.slideRect(in: sourceSize, aspectRatio: aspectRatio)
+        let destination = Self.slideRect(in: bounds.size, aspectRatio: aspectRatio)
+        guard source.width > 0, destination.width > 0 else {
+            setDrawing(drawing)
+            return
+        }
+        let scale = destination.width / source.width
+        var transform = CGAffineTransform(translationX: destination.minX, y: destination.minY)
+        transform = transform.scaledBy(x: scale, y: scale)
+        transform = transform.translatedBy(x: -source.minX, y: -source.minY)
+        setDrawing(drawing.transformed(using: transform))
     }
 
     func setDrawing(_ drawing: PKDrawing) {

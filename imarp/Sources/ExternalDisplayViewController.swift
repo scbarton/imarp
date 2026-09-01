@@ -47,11 +47,31 @@ final class ExternalDisplayViewController: UIViewController {
         reloadDeckFromStore()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // The rescale depends on this canvas's bounds, which aren't final when
+        // the scene first connects — redo it once they are.
+        showRescaledDrawing(for: currentIndex)
+    }
+
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
         currentIndex = 0
         slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory)
-        slideCanvas.configure(slideIndex: currentIndex, drawing: store.drawing(for: currentIndex))
+        slideCanvas.contentView.showSlide(index: currentIndex)
+        showRescaledDrawing(for: currentIndex)
+    }
+
+    /// Ink arrives in the iPad canvas's coordinate space, which is a different
+    /// size (and often a different shape) from this display's, so it has to be
+    /// mapped across rather than shown as-is.
+    private func showRescaledDrawing(for slideIndex: Int) {
+        let store = PresentationStore.shared
+        slideCanvas.setDrawing(
+            store.drawing(for: slideIndex),
+            authoredOnCanvasOfSize: store.authoringCanvasSize,
+            aspectRatio: store.slideAspectRatio
+        )
     }
 
     private func handleStepRequested(_ note: Notification) {
@@ -59,12 +79,12 @@ final class ExternalDisplayViewController: UIViewController {
         slideCanvas.step(forward: forward) { [weak self] newIndex in
             guard let self else { return }
             currentIndex = newIndex
-            slideCanvas.setDrawing(PresentationStore.shared.drawing(for: newIndex))
+            showRescaledDrawing(for: newIndex)
         }
     }
 
     @objc private func handleDrawingChanged(_ note: Notification) {
         guard let slideIndex = note.userInfo?["slideIndex"] as? Int, slideIndex == currentIndex else { return }
-        slideCanvas.setDrawing(PresentationStore.shared.drawing(for: slideIndex))
+        showRescaledDrawing(for: slideIndex)
     }
 }

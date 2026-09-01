@@ -11,6 +11,18 @@ final class MainViewController: UIViewController {
     private let toolbar = UIToolbar()
     private let toolPicker = PKToolPicker()
     private var hideAnnotationsButton: UIBarButtonItem?
+    private var presentButton: UIBarButtonItem?
+
+    /// Typed as `AnyObject` because a stored property can't have an
+    /// iOS 27-only type while the deployment target is 17.0; the computed
+    /// property below restores the real type behind an availability check.
+    private var displayRegistrationStorage: AnyObject?
+
+    @available(iOS 27.0, *)
+    private var displayRegistration: UISceneAccessoryRegistration? {
+        get { displayRegistrationStorage as? UISceneAccessoryRegistration }
+        set { displayRegistrationStorage = newValue }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -28,8 +40,14 @@ final class MainViewController: UIViewController {
         )
         hideAnnotationsButton = hideButton
 
+        let presentItem = UIBarButtonItem(
+            title: "Present", style: .plain, target: self, action: #selector(presentTapped)
+        )
+        presentButton = presentItem
+
         toolbar.items = [
             UIBarButtonItem(title: "Open…", style: .plain, target: self, action: #selector(openTapped)),
+            presentItem,
             UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
             UIBarButtonItem(title: "◀ Prev", style: .plain, target: self, action: #selector(previousTapped)),
             UIBarButtonItem(title: "Next ▶", style: .plain, target: self, action: #selector(nextTapped)),
@@ -62,7 +80,35 @@ final class MainViewController: UIViewController {
             self?.reloadDeckFromStore()
         }
 
+        registerExternalDisplayAccessory()
         reloadDeckFromStore()
+    }
+
+    /// iOS 27 changed how an app gets the external display. Previously the
+    /// system connected a `.windowExternalDisplayNonInteractive` scene on its
+    /// own and the app opted out by ignoring it; as of iOS 27 that scene is
+    /// only offered to an app that has registered a *scene accessory*, and
+    /// requesting the role directly fails outright with "the requested role
+    /// … is not supported".
+    ///
+    /// The registration is tied to this view controller: while it's on screen,
+    /// enabled, and a display is attached, the system connects the scene and
+    /// drives `ExternalDisplaySceneDelegate`.
+    private func registerExternalDisplayAccessory() {
+        // On iOS 17–26 the system connects the external scene by itself, using
+        // the manifest entry in Info.plist; nothing to register.
+        guard #available(iOS 27.0, *) else { return }
+        let configuration = UISceneConfiguration()
+        configuration.delegateClass = ExternalDisplaySceneDelegate.self
+        let accessory = UISceneAccessory.externalNonInteractive(sceneConfiguration: configuration)
+        displayRegistration = registerSceneAccessory(accessory)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // The external display rescales ink relative to this size, so it has
+        // to reflect the canvas ink is actually drawn on (and follow rotation).
+        PresentationStore.shared.setAuthoringCanvasSize(slideCanvas.bounds.size)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -70,6 +116,7 @@ final class MainViewController: UIViewController {
         toolPicker.addObserver(slideCanvas.canvasView)
         toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
         slideCanvas.canvasView.becomeFirstResponder()
+        updatePresentButtonTitle()
     }
 
     private func reloadDeckFromStore() {
@@ -113,6 +160,27 @@ final class MainViewController: UIViewController {
         }
     }
 
+    /// Toggles the dedicated external-display presentation. iPadOS mirrors by
+    /// default and only surrenders the display to an app that explicitly asks
+    /// for it — see `ExternalDisplay`.
+    /// The system presents the accessory automatically whenever a display is
+    /// attached, so this is a manual override for suppressing it (e.g. to drop
+    /// back to mirroring mid-talk) rather than the thing that starts it.
+    @objc private func presentTapped() {
+        guard #available(iOS 27.0, *), let registration = displayRegistration else { return }
+        registration.isEnabled.toggle()
+        // The scene connects/disconnects asynchronously, so let the system
+        // settle before reading state back for the button title.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.updatePresentButtonTitle()
+        }
+    }
+
+    private func updatePresentButtonTitle() {
+        guard #available(iOS 27.0, *), let registration = displayRegistration else { return }
+        presentButton?.title = registration.isEnabled ? "Mirror" : "Present"
+    }
+
     @objc private func hideAnnotationsTapped() {
         let store = PresentationStore.shared
         let hidden = !store.annotationsHidden
@@ -154,21 +222,35 @@ final class MainViewController: UIViewController {
 extension MainViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let bundleURL = urls.first else { return }
-        do {
-            let contents = try MarpBundleLoader.load(from: bundleURL)
-            PresentationStore.shared.loadDeck(
-                htmlURL: contents.deckHTMLURL,
-                directory: contents.deckDirectory,
-                slideCount: contents.slideCount
-            )
-        } catch {
-            let alert = UIAlertController(
-                title: "Couldn't Open Deck",
-                message: "\(bundleURL.lastPathComponent) doesn't look like a valid .imarpbundle: \(error)",
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
+
+        // Opening a source-only bundle renders on-device (a few JS
+        // round-trips through MarpRenderer), so this isn't instant —
+        // show something rather than a frozen toolbar.
+        let spinner = UIActivityIndicatorView(style: .large)
+        spinner.center = view.center
+        spinner.startAnimating()
+        view.addSubview(spinner)
+
+        MarpBundleLoader.load(from: bundleURL) { [weak self] result in
+            guard let self else { return }
+            spinner.removeFromSuperview()
+            switch result {
+            case .success(let contents):
+                PresentationStore.shared.loadDeck(
+                    htmlURL: contents.deckHTMLURL,
+                    directory: contents.deckDirectory,
+                    slideCount: contents.slideCount,
+                    slideAspectRatio: contents.slideAspectRatio
+                )
+            case .failure(let error):
+                let alert = UIAlertController(
+                    title: "Couldn't Open Deck",
+                    message: "\(bundleURL.lastPathComponent) doesn't look like a valid .imarpbundle: \(error)",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                present(alert, animated: true)
+            }
         }
     }
 }

@@ -6,9 +6,11 @@ export — annotation and presentation only, no in-app deck editing.
 
 ## How it works
 
-- Decks are rendered to HTML **offline** (via `marp-cli` on a Mac) and opened
-  in the app as an `.imarpbundle` package — the app never does Marp rendering
-  itself.
+- Decks render **on-device**: `@marp-team/marp-core` is bundled (as an esbuild
+  browser build) and run in a hidden `WKWebView`, so editing a deck's Markdown
+  in any Files-aware editor and reopening it is enough — no Mac round-trip. The
+  rendered HTML is cached inside the bundle and reused until the Markdown is
+  newer.
 - Each slide gets its own `PKDrawing` ink layer, drawn with Apple Pencil (or
   finger) via a `PKCanvasView` overlaid on a `WKWebView`.
 - Navigation (including Marp's incremental bullet builds) is driven by
@@ -18,7 +20,8 @@ export — annotation and presentation only, no in-app deck editing.
 - Connecting an external display opens a second `UIWindowScene` showing just
   the slide + ink, no toolbar — it stays in lockstep with the main screen by
   reacting to the same navigation/ink events rather than being told a slide
-  index.
+  index. Ink is remapped slide-rect to slide-rect on the way across, since the
+  two screens letterbox the slide differently.
 - **Export PDF** composites each slide's fully-built state (all bullets
   revealed) with its ink overlay into one page per slide.
 
@@ -28,20 +31,22 @@ A package directory (opens as a single item from Files/iCloud):
 
 ```
 MyDeck.imarpbundle/
-  info.json           { "slideCount": N }
-  rendered/
-    deck.html         marp-cli's rendered output
-    assets/           images/fonts the deck references locally
+  source/
+    deck.md           the actual Markdown — what an external editor touches
+    theme.css         optional; registered with marp-core by name
+    assets/           images/fonts deck.md references locally
+  rendered/           cache, regenerated on-device when deck.md is newer
+    deck.html
+    assets/
 ```
 
-To produce one from a `.md` deck:
+The app is still presentation-only — it never writes `source/`. Keeping the
+Markdown in the bundle is what lets a separate editor (iA Writer, Obsidian, …)
+edit the deck in place via Files/iCloud.
 
-```sh
-marp deck.md --html --allow-local-files --theme-set path/to/theme.css -o MyDeck.imarpbundle/rendered/deck.html
-echo '{"slideCount": N}' > MyDeck.imarpbundle/info.json
-```
-
-(`N` is currently hand-counted — nothing validates it against the deck yet.)
+A bundle with only `rendered/` (static HTML, no editable source) also opens
+fine. Slide count and aspect ratio are parsed from the rendered HTML, so
+nothing needs to be maintained by hand.
 
 ## Building
 
@@ -68,5 +73,8 @@ device and generate a provisioning profile).
 
 - Ink is in-memory only — it isn't written back into the `.imarpbundle`, so
   it's lost on relaunch or when opening a different deck.
-- `slideCount` in `info.json` is manually maintained.
-- No on-device Marp rendering or deck editing — decks must be pre-rendered.
+- Ink is stored in the authoring canvas's coordinates and rescaled for display.
+  Storing it in normalized slide coordinates would be more durable, and is
+  worth doing alongside ink persistence.
+- The external display uses `UISceneAccessory`, which is iOS 27+. A legacy
+  path for iOS 17–26 is present but untested.
