@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#ffffff"/>
+  <polygon points="0,170.67 0,1024 1024,1024 1024,853.33" fill="#ededed"/>
+  <g transform="translate(60.75,223.2) scale(3.61)">
+    <path fill="#67b8e3" d="M250 0l-90 90v70h90V0z"/>
+    <path fill="#0288d1" d="M160 0L0 160h90l70-70V0z"/>
+    <path fill="#02669d" d="M90 160h70V90l-70 70z"/>
+  </g>
+</svg>

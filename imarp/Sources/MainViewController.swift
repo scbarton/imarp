@@ -24,6 +24,29 @@ final class MainViewController: UIViewController {
         set { displayRegistrationStorage = newValue }
     }
 
+    /// Presentation clickers (connected via the adapter's USB port, or
+    /// Bluetooth) enumerate as HID keyboards and send one of these key sets —
+    /// UIKit routes them here via the responder chain regardless of which
+    /// view currently holds focus, so no pairing/setup step is needed beyond
+    /// plugging the clicker in.
+    override var keyCommands: [UIKeyCommand]? {
+        // Plain arrow keys are claimed by iPadOS's focus-navigation system
+        // (moving focus between the toolbar's buttons) before they'd
+        // otherwise reach these key commands — wantsPriorityOverSystemBehavior
+        // opts back in. Space isn't used for focus movement, so it worked
+        // without this.
+        [
+            UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [], action: #selector(nextTapped)),
+            UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(nextTapped)),
+            UIKeyCommand(input: " ", modifierFlags: [], action: #selector(nextTapped)),
+            UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: [], action: #selector(previousTapped)),
+            UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(previousTapped)),
+        ].map {
+            $0.wantsPriorityOverSystemBehavior = true
+            return $0
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -72,6 +95,17 @@ final class MainViewController: UIViewController {
             slideCanvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             slideCanvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+
+        // Finger-only (excludes .pencil) so a fast pencil stroke while
+        // annotating is never misread as a page-advance swipe.
+        let swipeLeft = UISwipeGestureRecognizer(target: self, action: #selector(nextTapped))
+        swipeLeft.direction = .left
+        swipeLeft.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        let swipeRight = UISwipeGestureRecognizer(target: self, action: #selector(previousTapped))
+        swipeRight.direction = .right
+        swipeRight.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        slideCanvas.canvasView.addGestureRecognizer(swipeLeft)
+        slideCanvas.canvasView.addGestureRecognizer(swipeRight)
 
         NotificationCenter.default.addObserver(forName: .stepRequested, object: nil, queue: .main) { [weak self] note in
             self?.handleStepRequested(note)
