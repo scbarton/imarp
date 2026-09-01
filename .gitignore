@@ -1,6 +1,6 @@
 # XcodeGen-generated project and Info.plist — regenerate with `xcodegen generate`
-iMarp.xcodeproj/
-iMarp/Resources/Info.plist
+imarp.xcodeproj/
+imarp/Resources/Info.plist
 
 # Build products
 build/
@@ -12,3 +12,6 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# marp-engine-build: npm deps (reproducible via `npm install`)
+marp-engine-build/node_modules/
