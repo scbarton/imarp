@@ -1,0 +1,61 @@
+name: iMarp
+options:
+  bundleIdPrefix: org.powrbox
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  iMarp:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: iMarp/Sources
+      - path: iMarp/Resources
+        excludes:
+          - "Deck/**"
+      - path: iMarp/Resources/Deck
+        type: folder
+        buildPhase: resources
+    info:
+      path: iMarp/Resources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+            UIWindowSceneSessionRoleExternalDisplay:
+              - UISceneConfigurationName: External Display Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: org.powrbox.imarpbundle
+            UTTypeDescription: iMarp Presentation
+            UTTypeConformsTo:
+              - com.apple.package
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - imarpbundle
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: iMarp Presentation
+            LSItemContentTypes:
+              - org.powrbox.imarpbundle
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.powrbox.imarp
+        TARGETED_DEVICE_FAMILY: "2"
+        SWIFT_VERSION: "5.0"
+        ASSETSCATALOG_COMPILER_APPICON_NAME: AppIcon
+        DEVELOPMENT_TEAM: WR7X27PQB5
+        CODE_SIGN_STYLE: Automatic

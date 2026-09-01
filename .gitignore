@@ -1,0 +1,14 @@
+# XcodeGen-generated project and Info.plist — regenerate with `xcodegen generate`
+iMarp.xcodeproj/
+iMarp/Resources/Info.plist
+
+# Build products
+build/
+DerivedData/
+
+# Xcode user-specific
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
