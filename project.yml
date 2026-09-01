@@ -1,23 +1,23 @@
-name: iMarp
+name: imarp
 options:
   bundleIdPrefix: org.powrbox
   deploymentTarget:
     iOS: "17.0"
 targets:
-  iMarp:
+  imarp:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: iMarp/Sources
-      - path: iMarp/Resources
+      - path: imarp/Sources
+      - path: imarp/Resources
         excludes:
           - "Deck/**"
-      - path: iMarp/Resources/Deck
+      - path: imarp/Resources/Deck
         type: folder
         buildPhase: resources
     info:
-      path: iMarp/Resources/Info.plist
+      path: imarp/Resources/Info.plist
       properties:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
@@ -37,7 +37,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: org.powrbox.imarpbundle
-            UTTypeDescription: iMarp Presentation
+            UTTypeDescription: imarp Presentation
             UTTypeConformsTo:
               - com.apple.package
               - public.data
@@ -46,7 +46,7 @@ targets:
                 - imarpbundle
         LSSupportsOpeningDocumentsInPlace: true
         CFBundleDocumentTypes:
-          - CFBundleTypeName: iMarp Presentation
+          - CFBundleTypeName: imarp Presentation
             LSItemContentTypes:
               - org.powrbox.imarpbundle
             CFBundleTypeRole: Editor
