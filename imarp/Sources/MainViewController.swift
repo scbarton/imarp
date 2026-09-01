@@ -13,6 +13,11 @@ final class MainViewController: UIViewController {
     private var hideAnnotationsButton: UIBarButtonItem?
     private var presentButton: UIBarButtonItem?
 
+    /// The bundle URL currently holding a `startAccessingSecurityScopedResource`
+    /// claim (see `UIDocumentPickerDelegate` below), so it can be released
+    /// when a different deck is opened.
+    private var accessedBundleURL: URL?
+
     /// Typed as `AnyObject` because a stored property can't have an
     /// iOS 27-only type while the deployment target is 17.0; the computed
     /// property below restores the real type behind an availability check.
@@ -224,8 +229,13 @@ final class MainViewController: UIViewController {
     }
 
     @objc private func openTapped() {
-        guard let bundleType = UTType(filenameExtension: "imarpbundle") else { return }
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [bundleType], asCopy: true)
+        guard let bundleType = UTType(filenameExtension: "marpbundle") else { return }
+        // asCopy: false — opening in place (rather than a throwaway copy in
+        // the app's Inbox) is what makes the rendered-HTML cache and ink
+        // persistence actually stick: both write back into the bundle
+        // MarpBundleLoader/PresentationStore were handed, so if that were a
+        // copy, every write would be discarded the next time this deck opens.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [bundleType], asCopy: false)
         picker.delegate = self
         present(picker, animated: true)
     }
@@ -257,6 +267,23 @@ extension MainViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let bundleURL = urls.first else { return }
 
+        // Opening in place (see openTapped) means this URL is
+        // security-scoped: reads/writes need startAccessingSecurityScopedResource
+        // for the duration this deck stays open. Only one deck is open at a
+        // time, so the previous one's access is released here too.
+        guard bundleURL.startAccessingSecurityScopedResource() else {
+            let alert = UIAlertController(
+                title: "Couldn't Open Deck",
+                message: "iOS denied access to \(bundleURL.lastPathComponent).",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            return
+        }
+        accessedBundleURL?.stopAccessingSecurityScopedResource()
+        accessedBundleURL = bundleURL
+
         // Opening a source-only bundle renders on-device (a few JS
         // round-trips through MarpRenderer), so this isn't instant —
         // show something rather than a frozen toolbar.
@@ -274,12 +301,15 @@ extension MainViewController: UIDocumentPickerDelegate {
                     htmlURL: contents.deckHTMLURL,
                     directory: contents.deckDirectory,
                     slideCount: contents.slideCount,
-                    slideAspectRatio: contents.slideAspectRatio
+                    slideAspectRatio: contents.slideAspectRatio,
+                    bundleURL: contents.bundleURL
                 )
             case .failure(let error):
+                accessedBundleURL?.stopAccessingSecurityScopedResource()
+                accessedBundleURL = nil
                 let alert = UIAlertController(
                     title: "Couldn't Open Deck",
-                    message: "\(bundleURL.lastPathComponent) doesn't look like a valid .imarpbundle: \(error)",
+                    message: "\(bundleURL.lastPathComponent) doesn't look like a valid .marpbundle: \(error)",
                     preferredStyle: .alert
                 )
                 alert.addAction(UIAlertAction(title: "OK", style: .default))

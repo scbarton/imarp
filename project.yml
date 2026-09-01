@@ -51,19 +51,19 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: org.powrbox.imarpbundle
+          - UTTypeIdentifier: org.powrbox.marpbundle
             UTTypeDescription: imarp Presentation
             UTTypeConformsTo:
               - com.apple.package
               - public.data
             UTTypeTagSpecification:
               public.filename-extension:
-                - imarpbundle
+                - marpbundle
         LSSupportsOpeningDocumentsInPlace: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: imarp Presentation
             LSItemContentTypes:
-              - org.powrbox.imarpbundle
+              - org.powrbox.marpbundle
             CFBundleTypeRole: Editor
             LSHandlerRank: Owner
     settings:

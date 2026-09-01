@@ -52,7 +52,7 @@ final class SlideContentView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Loads a deck (the bundled sample, or one opened from an
-    /// `.imarpbundle`), replacing whatever was previously shown.
+    /// `.marpbundle`), replacing whatever was previously shown.
     func load(htmlURL: URL, directory: URL) {
         didFinishInitialLoad = false
         pendingSlideIndex = nil

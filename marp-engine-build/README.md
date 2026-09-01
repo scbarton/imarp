@@ -26,5 +26,8 @@ new Marp({ html: true, container: new Element('div', { id: ':$p' }) })
 (`Element` from `@marp-team/marpit`) to get byte-compatible output.
 
 Next step: wire this into the app as `MarpRenderer.swift` (a hidden
-`WKWebView` running `marp-engine.min.js`) and extend `.imarpbundle` to carry
-`source/deck.md` for on-device rendering, per the plan discussed in-session.
+`WKWebView` running `marp-engine.min.js`) and extend `.marpbundle` to carry
+`source.md` for on-device rendering, per the plan discussed in-session.
+
+(Done — see `MarpBundleLoader.swift` and the top-level README for the format
+this shipped as.)

@@ -1,7 +1,7 @@
--- Packages the frontmost BBEdit document into an .imarpbundle, using
--- make-imarpbundle.sh (installed alongside this script by install.sh).
+-- Packages the frontmost BBEdit document into a .marpbundle, using
+-- make-marpbundle.sh (installed alongside this script by install.sh).
 -- Install with tools/bbedit/install.sh; it then appears in BBEdit's
--- Scripts menu as "Export to imarpbundle".
+-- Scripts menu as "Export to marpbundle".
 
 tell application "BBEdit"
 	if (count of documents) is 0 then
@@ -14,7 +14,7 @@ tell application "BBEdit"
 end tell
 
 set docPOSIX to POSIX path of (docFile as text)
-set helperPath to (POSIX path of (path to home folder)) & "Library/Application Support/imarp/make-imarpbundle.sh"
+set helperPath to (POSIX path of (path to home folder)) & "Library/Application Support/imarp/make-marpbundle.sh"
 
 try
 	set bundlePath to do shell script quoted form of helperPath & " " & quoted form of docPOSIX
@@ -32,4 +32,4 @@ tell application "Finder"
 	reveal (POSIX file bundlePath as alias)
 end tell
 
-display notification ("Exported " & docName) with title "imarp" subtitle "Saved as .imarpbundle"
+display notification ("Exported " & docName) with title "imarp" subtitle "Saved as .marpbundle"

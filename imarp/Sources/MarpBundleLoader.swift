@@ -1,25 +1,33 @@
 import Foundation
 import CoreGraphics
 
-/// An `.imarpbundle` is a package directory (opens as a single item from
-/// Files/iCloud), laid out as:
+/// An `.marpbundle` is a package directory (opens as a single item from
+/// Files/iCloud), laid out flat so `source.html` and `assets/` are plain
+/// siblings — no `<base href>` or asset-copying trick needed for images to
+/// resolve, since everything a slide can reference lives in the same
+/// directory as the HTML that references it:
 ///
-///   MyDeck.imarpbundle/
-///     source/
-///       deck.md          the actual Markdown — this is what an external
+///   MyDeck.marpbundle/
+///     source.md          the actual Markdown — this is what an external
 ///                        editor (iA Writer, Obsidian, etc.) touches
-///       theme.css        optional; registered with marp-core by name,
-///                        same convention as marp-cli's --theme-set
-///       assets/          images/fonts deck.md references locally
-///     rendered/          cache — regenerated on-device whenever source/
-///       deck.html        is newer, via MarpRenderer. Never hand-edited.
-///       assets/
+///     source.html        cache — regenerated on-device whenever source.md
+///                        is newer, via MarpRenderer. Never hand-edited.
+///     theme.css          optional; registered with marp-core by name, same
+///                        convention as marp-cli's --theme-set
+///     assets/            images/fonts source.md (and so source.html) refer
+///                        to locally
+///     ink/               Apple Pencil annotations, one file per slide index
+///       0.drawing        (PKDrawing.dataRepresentation()) — see
+///       ...              PresentationStore. Kept separate from the two
+///                        files above so re-exporting the deck (which only
+///                        touches source.md/source.html) never wipes
+///                        annotations.
 ///
 /// imarp is still read-only/presentation-only — it has no editing UI of its
 /// own — but it does the actual Markdown → HTML rendering on-device (see
 /// MarpRenderer), so a deck can be edited from any Markdown-capable app
-/// without ever touching a Mac. A bundle with only `rendered/` (no
-/// `source/`) is also accepted, for decks that genuinely are just static
+/// without ever touching a Mac. A bundle with only `source.html` (no
+/// `source.md`) is also accepted, for decks that genuinely are just static
 /// HTML with no editable source.
 enum MarpBundleLoader {
     struct Contents {
@@ -27,6 +35,9 @@ enum MarpBundleLoader {
         let deckDirectory: URL
         let slideCount: Int
         let slideAspectRatio: CGFloat
+        /// The `.marpbundle` root — where PresentationStore persists ink
+        /// (`ink/<slideIndex>.drawing`).
+        let bundleURL: URL
     }
 
     enum LoadError: Error {
@@ -36,36 +47,36 @@ enum MarpBundleLoader {
 
     static func load(from bundleURL: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
         let fm = FileManager.default
-        let sourceDeckURL = bundleURL.appendingPathComponent("source/deck.md")
-        let renderedDeckURL = bundleURL.appendingPathComponent("rendered/deck.html")
-        let renderedDir = bundleURL.appendingPathComponent("rendered", isDirectory: true)
+        let sourceMDURL = bundleURL.appendingPathComponent("source.md")
+        let sourceHTMLURL = bundleURL.appendingPathComponent("source.html")
 
-        let hasSource = fm.fileExists(atPath: sourceDeckURL.path)
-        let hasRendered = fm.fileExists(atPath: renderedDeckURL.path)
+        let hasMarkdown = fm.fileExists(atPath: sourceMDURL.path)
+        let hasHTML = fm.fileExists(atPath: sourceHTMLURL.path)
 
-        if hasSource, !hasRendered || sourceIsNewer(sourceDeckURL, than: renderedDeckURL) {
-            renderFromSource(bundleURL: bundleURL, sourceDeckURL: sourceDeckURL, completion: completion)
+        if hasMarkdown, !hasHTML || sourceIsNewer(sourceMDURL, than: sourceHTMLURL) {
+            renderFromSource(bundleURL: bundleURL, sourceMDURL: sourceMDURL, completion: completion)
             return
         }
 
-        guard hasRendered, let html = try? String(contentsOf: renderedDeckURL, encoding: .utf8) else {
+        guard hasHTML, let html = try? String(contentsOf: sourceHTMLURL, encoding: .utf8) else {
             completion(.failure(LoadError.missingContent))
             return
         }
         completion(.success(Contents(
-            deckHTMLURL: renderedDeckURL,
-            deckDirectory: renderedDir,
+            deckHTMLURL: sourceHTMLURL,
+            deckDirectory: bundleURL,
             slideCount: slideCount(in: html),
-            slideAspectRatio: slideAspectRatio(in: html)
+            slideAspectRatio: slideAspectRatio(in: html),
+            bundleURL: bundleURL
         )))
     }
 
-    private static func renderFromSource(bundleURL: URL, sourceDeckURL: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
-        guard let markdown = try? String(contentsOf: sourceDeckURL, encoding: .utf8) else {
+    private static func renderFromSource(bundleURL: URL, sourceMDURL: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
+        guard let markdown = try? String(contentsOf: sourceMDURL, encoding: .utf8) else {
             completion(.failure(LoadError.missingContent))
             return
         }
-        let themeCSS = try? String(contentsOf: bundleURL.appendingPathComponent("source/theme.css"), encoding: .utf8)
+        let themeCSS = try? String(contentsOf: bundleURL.appendingPathComponent("theme.css"), encoding: .utf8)
 
         MarpRenderer.shared.render(markdown: markdown, themeCSS: themeCSS) { result in
             switch result {
@@ -75,27 +86,15 @@ enum MarpBundleLoader {
             case .success(let rendered):
                 do {
                     let assembled = try assemble(html: rendered.html, css: rendered.css)
-                    let renderedDir = bundleURL.appendingPathComponent("rendered", isDirectory: true)
-                    let renderedDeckURL = renderedDir.appendingPathComponent("deck.html")
-
-                    try FileManager.default.createDirectory(at: renderedDir, withIntermediateDirectories: true)
-                    try assembled.write(to: renderedDeckURL, atomically: true, encoding: .utf8)
-
-                    // Mirror source assets alongside the cache so the cached
-                    // HTML's relative image/font paths resolve exactly like
-                    // a marp-cli-rendered bundle's would.
-                    let sourceAssets = bundleURL.appendingPathComponent("source/assets", isDirectory: true)
-                    if FileManager.default.fileExists(atPath: sourceAssets.path) {
-                        let renderedAssets = renderedDir.appendingPathComponent("assets", isDirectory: true)
-                        try? FileManager.default.removeItem(at: renderedAssets)
-                        try FileManager.default.copyItem(at: sourceAssets, to: renderedAssets)
-                    }
+                    let sourceHTMLURL = bundleURL.appendingPathComponent("source.html")
+                    try assembled.write(to: sourceHTMLURL, atomically: true, encoding: .utf8)
 
                     completion(.success(Contents(
-                        deckHTMLURL: renderedDeckURL,
-                        deckDirectory: renderedDir,
+                        deckHTMLURL: sourceHTMLURL,
+                        deckDirectory: bundleURL,
                         slideCount: slideCount(in: assembled),
-                        slideAspectRatio: slideAspectRatio(in: assembled)
+                        slideAspectRatio: slideAspectRatio(in: assembled),
+                        bundleURL: bundleURL
                     )))
                 } catch {
                     completion(.failure(error))

@@ -18,3 +18,7 @@ marp-engine-build/node_modules/
 
 # Scratch output from shell/theme extraction experiments
 marp-engine-build/assembled_theme_test.html
+
+# SourceOnlyTest.marpbundle is deliberately source-only, to exercise
+# on-device rendering — never commit the cache it regenerates.
+deck-source/SourceOnlyTest.marpbundle/source.html
