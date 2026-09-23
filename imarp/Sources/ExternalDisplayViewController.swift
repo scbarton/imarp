@@ -42,6 +42,15 @@ final class ExternalDisplayViewController: UIViewController {
             self, selector: #selector(handleDrawingChanged(_:)),
             name: .drawingDidChange, object: nil
         )
+        NotificationCenter.default.addObserver(forName: .pointerDidMove, object: nil, queue: .main) { [weak self] note in
+            guard let self else { return }
+            let point = (note.userInfo?["point"] as? NSValue)?.cgPointValue
+            slideCanvas.setPointer(normalizedPoint: point, aspectRatio: PresentationStore.shared.slideAspectRatio)
+        }
+        NotificationCenter.default.addObserver(forName: .pointerEnabledDidChange, object: nil, queue: .main) { [weak self] note in
+            guard let enabled = note.userInfo?["enabled"] as? Bool, !enabled else { return }
+            self?.slideCanvas.setPointer(normalizedPoint: nil, aspectRatio: 0)
+        }
 
         slideCanvas.canvasView.isHidden = PresentationStore.shared.annotationsHidden
         reloadDeckFromStore()

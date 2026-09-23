@@ -113,12 +113,70 @@ extension SlideContentView: WKNavigationDelegate {
     }
 }
 
+/// A small laser-pointer-style dot + glow, positioned in the host view's own
+/// coordinate space by `SlideCanvasView.setPointer(normalizedPoint:aspectRatio:)`.
+/// Never intercepts touches — it's purely a display layer, so hover/gesture
+/// recognizers on the canvas beneath it keep working normally.
+final class PointerDotView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        isHidden = true
+        layer.addSublayer(glowLayer)
+        layer.addSublayer(dotLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private let dotDiameter: CGFloat = 22
+    private let glowDiameter: CGFloat = 60
+
+    private lazy var dotLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.systemRed.cgColor
+        layer.bounds = CGRect(x: 0, y: 0, width: dotDiameter, height: dotDiameter)
+        layer.path = UIBezierPath(ovalIn: layer.bounds).cgPath
+        return layer
+    }()
+
+    private lazy var glowLayer: CAGradientLayer = {
+        let layer = CAGradientLayer()
+        layer.type = .radial
+        layer.colors = [
+            UIColor.systemRed.withAlphaComponent(0.55).cgColor,
+            UIColor.systemRed.withAlphaComponent(0.0).cgColor,
+        ]
+        layer.locations = [0, 1]
+        layer.bounds = CGRect(x: 0, y: 0, width: glowDiameter, height: glowDiameter)
+        layer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        layer.endPoint = CGPoint(x: 1, y: 1)
+        return layer
+    }()
+
+    func show(at point: CGPoint) {
+        isHidden = false
+        // Disable implicit position animations so the dot doesn't visibly
+        // lag behind a fast-moving hover — every update should land instantly.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dotLayer.position = point
+        glowLayer.position = point
+        CATransaction.commit()
+    }
+
+    func hide() {
+        isHidden = true
+    }
+}
+
 /// A slide (content + ink overlay) with an on/off switch for accepting
 /// Pencil input — the iPad-side canvas is interactive, the external
 /// display's canvas is display-only.
 final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     let contentView = SlideContentView()
     let canvasView = PKCanvasView()
+    let pointerDotView = PointerDotView()
 
     var isDrawingEnabled: Bool = true {
         didSet { canvasView.isUserInteractionEnabled = isDrawingEnabled }
@@ -130,6 +188,7 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         super.init(frame: frame)
         contentView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.translatesAutoresizingMaskIntoConstraints = false
+        pointerDotView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.backgroundColor = .clear
         // .anyInput would always allow finger drawing regardless of the
         // user's system-wide "Only Draw with Apple Pencil" setting; .default
@@ -139,6 +198,9 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
 
         addSubview(contentView)
         addSubview(canvasView)
+        // Above the ink layer, so the pointer stays visible even while
+        // drawing is on screen.
+        addSubview(pointerDotView)
         NSLayoutConstraint.activate([
             contentView.topAnchor.constraint(equalTo: topAnchor),
             contentView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -148,6 +210,10 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             canvasView.bottomAnchor.constraint(equalTo: bottomAnchor),
             canvasView.leadingAnchor.constraint(equalTo: leadingAnchor),
             canvasView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pointerDotView.topAnchor.constraint(equalTo: topAnchor),
+            pointerDotView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pointerDotView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pointerDotView.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
     }
 
@@ -212,6 +278,26 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
 
     func step(forward: Bool, completion: @escaping (Int) -> Void) {
         contentView.step(forward: forward, completion: completion)
+    }
+
+    /// `normalizedPoint` is in the slide's own 0...1 x 0...1 space; `nil`
+    /// hides the pointer. Mapped through this canvas's own `slideRect(in:aspectRatio:)`
+    /// exactly like ink is rescaled, so the dot lands correctly regardless of
+    /// how this canvas is letterboxed relative to where the point originated.
+    func setPointer(normalizedPoint: CGPoint?, aspectRatio: CGFloat) {
+        guard let normalizedPoint else {
+            pointerDotView.hide()
+            return
+        }
+        let rect = Self.slideRect(in: bounds.size, aspectRatio: aspectRatio)
+        guard rect.width > 0, rect.height > 0 else {
+            pointerDotView.hide()
+            return
+        }
+        pointerDotView.show(at: CGPoint(
+            x: rect.minX + normalizedPoint.x * rect.width,
+            y: rect.minY + normalizedPoint.y * rect.height
+        ))
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {

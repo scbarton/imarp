@@ -12,6 +12,7 @@ final class MainViewController: UIViewController {
     private let toolPicker = PKToolPicker()
     private var hideAnnotationsButton: UIBarButtonItem?
     private var presentButton: UIBarButtonItem?
+    private var pointerToggleButton: UIBarButtonItem?
 
     /// The bundle URL currently holding a `startAccessingSecurityScopedResource`
     /// claim (see `UIDocumentPickerDelegate` below), so it can be released
@@ -73,9 +74,15 @@ final class MainViewController: UIViewController {
         )
         presentButton = presentItem
 
+        let pointerItem = UIBarButtonItem(
+            title: "Pointer", style: .plain, target: self, action: #selector(pointerToggleTapped)
+        )
+        pointerToggleButton = pointerItem
+
         toolbar.items = [
             UIBarButtonItem(title: "Open…", style: .plain, target: self, action: #selector(openTapped)),
             presentItem,
+            pointerItem,
             UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
             UIBarButtonItem(title: "◀ Prev", style: .plain, target: self, action: #selector(previousTapped)),
             UIBarButtonItem(title: "Next ▶", style: .plain, target: self, action: #selector(nextTapped)),
@@ -112,11 +119,27 @@ final class MainViewController: UIViewController {
         slideCanvas.canvasView.addGestureRecognizer(swipeLeft)
         slideCanvas.canvasView.addGestureRecognizer(swipeRight)
 
+        // Apple Pencil hover (proximity, no touch-down) drives the laser
+        // pointer. It never fires during an actual touch-down stroke, so
+        // there's no conflict with PencilKit's own drawing or with the
+        // finger-only swipe recognizers above.
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+        slideCanvas.addGestureRecognizer(hover)
+
         NotificationCenter.default.addObserver(forName: .stepRequested, object: nil, queue: .main) { [weak self] note in
             self?.handleStepRequested(note)
         }
         NotificationCenter.default.addObserver(forName: .deckDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.reloadDeckFromStore()
+        }
+        NotificationCenter.default.addObserver(forName: .pointerEnabledDidChange, object: nil, queue: .main) { [weak self] note in
+            guard let enabled = note.userInfo?["enabled"] as? Bool else { return }
+            self?.pointerToggleButton?.title = enabled ? "Pointer On" : "Pointer"
+        }
+        NotificationCenter.default.addObserver(forName: .pointerDidMove, object: nil, queue: .main) { [weak self] note in
+            guard let self else { return }
+            let point = (note.userInfo?["point"] as? NSValue)?.cgPointValue
+            slideCanvas.setPointer(normalizedPoint: point, aspectRatio: PresentationStore.shared.slideAspectRatio)
         }
 
         registerExternalDisplayAccessory()
@@ -218,6 +241,37 @@ final class MainViewController: UIViewController {
     private func updatePresentButtonTitle() {
         guard #available(iOS 27.0, *), let registration = displayRegistration else { return }
         presentButton?.title = registration.isEnabled ? "Mirror" : "Present"
+    }
+
+    @objc private func pointerToggleTapped() {
+        let store = PresentationStore.shared
+        store.setPointerEnabled(!store.pointerEnabled)
+    }
+
+    @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
+        let store = PresentationStore.shared
+        guard store.pointerEnabled else { return }
+        switch recognizer.state {
+        case .began, .changed:
+            let location = recognizer.location(in: slideCanvas)
+            let rect = SlideCanvasView.slideRect(in: slideCanvas.bounds.size, aspectRatio: store.slideAspectRatio)
+            guard rect.width > 0, rect.height > 0 else { return }
+            let normalized = CGPoint(
+                x: (location.x - rect.minX) / rect.width,
+                y: (location.y - rect.minY) / rect.height
+            )
+            // Only show the pointer while actually over the slide itself,
+            // not the letterbox bars around it.
+            guard (0...1).contains(normalized.x), (0...1).contains(normalized.y) else {
+                store.setPointerPosition(nil)
+                return
+            }
+            store.setPointerPosition(normalized)
+        case .ended, .cancelled, .failed:
+            store.setPointerPosition(nil)
+        default:
+            break
+        }
     }
 
     @objc private func hideAnnotationsTapped() {

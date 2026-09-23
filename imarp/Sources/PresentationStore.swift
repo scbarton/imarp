@@ -24,6 +24,20 @@ extension Notification.Name {
     /// shows exactly what the presenter sees, so hiding ink to check the
     /// bare slide underneath hides it everywhere, not just on the iPad.
     static let annotationsHiddenDidChange = Notification.Name("annotationsHiddenDidChange")
+    /// Posted whenever the laser pointer's position or visibility changes.
+    /// userInfo["point"]: NSValue(CGPoint)?, normalized to the SLIDE's own
+    /// 0...1 x 0...1 space (not the canvas) — absent/nil means "hidden".
+    /// Both scenes observe this and re-derive their own canvas-space
+    /// position by mapping the normalized point through their own
+    /// `SlideCanvasView.slideRect(in:aspectRatio:)`, exactly like ink is
+    /// rescaled, so the dot lands over the same part of the slide on both
+    /// screens regardless of how differently each canvas is letterboxed.
+    static let pointerDidMove = Notification.Name("pointerDidMove")
+    /// Posted (userInfo["enabled"]: Bool) when the toolbar pointer toggle is
+    /// flipped. Both scenes observe this so a display connecting
+    /// mid-presentation starts in the right state, and so the main scene's
+    /// hover recognizer can be gated at the source.
+    static let pointerEnabledDidChange = Notification.Name("pointerEnabledDidChange")
 }
 
 /// Single source of truth shared by the main (toolbar) scene and the
@@ -75,6 +89,11 @@ final class PresentationStore {
     /// So a scene created/reconnected after the toggle (e.g. the external
     /// display connecting mid-presentation) starts in the right state.
     private(set) var annotationsHidden = false
+
+    /// Gates whether the main scene's Pencil-hover recognizer does anything
+    /// at all (see `MainViewController.handleHover(_:)`) — set via the
+    /// toolbar's "Pointer" toggle button.
+    private(set) var pointerEnabled = false
 
     private init() {
         // Bundled sample deck, shown until the user opens an .marpbundle.
@@ -187,5 +206,23 @@ final class PresentationStore {
     func setAnnotationsHidden(_ hidden: Bool) {
         annotationsHidden = hidden
         NotificationCenter.default.post(name: .annotationsHiddenDidChange, object: nil, userInfo: ["hidden": hidden])
+    }
+
+    func setPointerEnabled(_ enabled: Bool) {
+        pointerEnabled = enabled
+        if !enabled {
+            NotificationCenter.default.post(name: .pointerDidMove, object: nil, userInfo: [:])
+        }
+        NotificationCenter.default.post(name: .pointerEnabledDidChange, object: nil, userInfo: ["enabled": enabled])
+    }
+
+    /// `point` is normalized to the slide's own 0...1 x 0...1 space; `nil`
+    /// hides the pointer.
+    func setPointerPosition(_ point: CGPoint?) {
+        var userInfo: [String: Any] = [:]
+        if let point {
+            userInfo["point"] = NSValue(cgPoint: point)
+        }
+        NotificationCenter.default.post(name: .pointerDidMove, object: nil, userInfo: userInfo)
     }
 }
