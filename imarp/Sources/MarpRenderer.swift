@@ -11,6 +11,15 @@ import WebKit
 /// that machinery extracted from a real `marp-cli` build with two markers
 /// (`<!--IMARP_SLIDES-->`, `<!--IMARP_STYLE-->`) where fresh render output
 /// gets spliced in. See `MarpBundleLoader.assemblePresentation`.
+///
+/// Results come back via `postMessage`/`WKScriptMessageHandler` rather than
+/// `evaluateJavaScript`'s own return value: WKWebView's `evaluateJavaScript`
+/// completion-handler bridge has a well-known failure mode
+/// (`WKErrorDomain` code 5, "JavaScript execution returned a result of an
+/// unsupported type") when the returned value is a large/complex object —
+/// exactly what a full deck's rendered HTML+CSS is. `postMessage` doesn't
+/// share that limitation, so the render script posts its result instead of
+/// returning it.
 final class MarpRenderer: NSObject {
     static let shared = MarpRenderer()
 
@@ -24,14 +33,18 @@ final class MarpRenderer: NSObject {
         case invalidResponse
     }
 
+    private static let resultMessageHandlerName = "marpResult"
+
     private let webView: WKWebView
     private var didFinishLoad = false
     private var pendingWork: [() -> Void] = []
+    private var pendingRequests: [String: (Result<RenderResult, Error>) -> Void] = [:]
 
     private override init() {
         webView = WKWebView(frame: .zero)
         super.init()
         webView.navigationDelegate = self
+        webView.configuration.userContentController.add(self, name: Self.resultMessageHandlerName)
 
         guard let harnessURL = Bundle.main.url(forResource: "harness", withExtension: "html", subdirectory: "MarpEngine") else {
             fatalError("MarpEngine/harness.html is missing from the app bundle")
@@ -54,35 +67,30 @@ final class MarpRenderer: NSObject {
     }
 
     private func performRender(markdown: String, themeCSS: String?, completion: @escaping (Result<RenderResult, Error>) -> Void) {
+        let requestID = UUID().uuidString
+        pendingRequests[requestID] = completion
+
+        let idJS = Self.jsStringLiteral(requestID)
         let markdownJS = Self.jsStringLiteral(markdown)
         let themeJS = themeCSS.map(Self.jsStringLiteral) ?? "null"
         let script = """
             (function () {
                 try {
-                    return window.MarpEngine.render(\(markdownJS), \(themeJS));
+                    const result = window.MarpEngine.render(\(markdownJS), \(themeJS));
+                    window.webkit.messageHandlers.\(Self.resultMessageHandlerName).postMessage({ id: \(idJS), html: result.html, css: result.css });
                 } catch (e) {
-                    return { error: String((e && e.message) || e) };
+                    window.webkit.messageHandlers.\(Self.resultMessageHandlerName).postMessage({ id: \(idJS), error: String((e && e.message) || e) });
                 }
             })();
             """
-        webView.evaluateJavaScript(script) { result, error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let dict = result as? [String: Any] else {
-                completion(.failure(RenderError.invalidResponse))
-                return
-            }
-            if let message = dict["error"] as? String {
-                completion(.failure(RenderError.engineError(message)))
-                return
-            }
-            guard let html = dict["html"] as? String, let css = dict["css"] as? String else {
-                completion(.failure(RenderError.invalidResponse))
-                return
-            }
-            completion(.success(RenderResult(html: html, css: css)))
+        // The script itself no longer returns the (potentially huge) result —
+        // it posts it via the message handler above instead, so this
+        // evaluateJavaScript call only ever bridges back `undefined`/small
+        // values and won't hit the large-payload bridging bug.
+        webView.evaluateJavaScript(script) { [weak self] _, error in
+            guard let error else { return }
+            guard let self, let pending = self.pendingRequests.removeValue(forKey: requestID) else { return }
+            pending(.failure(error))
         }
     }
 
@@ -102,5 +110,22 @@ extension MarpRenderer: WKNavigationDelegate {
         let work = pendingWork
         pendingWork = []
         work.forEach { $0() }
+    }
+}
+
+extension MarpRenderer: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let dict = message.body as? [String: Any], let id = dict["id"] as? String else { return }
+        guard let completion = pendingRequests.removeValue(forKey: id) else { return }
+
+        if let errorMessage = dict["error"] as? String {
+            completion(.failure(RenderError.engineError(errorMessage)))
+            return
+        }
+        guard let html = dict["html"] as? String, let css = dict["css"] as? String else {
+            completion(.failure(RenderError.invalidResponse))
+            return
+        }
+        completion(.success(RenderResult(html: html, css: css)))
     }
 }
