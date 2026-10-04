@@ -22,6 +22,10 @@ final class SlideContentView: UIView {
     /// mid-transition.
     var onPositionChanged: ((SlidePosition) -> Void)?
 
+    /// Called with true when a slide transition starts animating and false
+    /// once it has finished.
+    var onTransitionActiveChanged: ((Bool) -> Void)?
+
     /// Prefix for debug logging, so the two screens' logs can be told apart.
     var debugLabel = "slides"
 
@@ -68,6 +72,24 @@ final class SlideContentView: UIView {
                 }
                 return result;
             };
+            // Marp's slide transitions run through the View Transitions API.
+            // Report when they start and finish, so ink for the outgoing
+            // slide can be hidden while the slides animate and the new
+            // slide's ink shown only once the animation is over.
+            if (typeof document.startViewTransition === 'function') {
+                var originalStartViewTransition = document.startViewTransition;
+                var running = 0;
+                document.startViewTransition = function () {
+                    var transition = originalStartViewTransition.apply(document, arguments);
+                    running += 1;
+                    if (running === 1) { window.webkit.messageHandlers.imarpTransition.postMessage(true); }
+                    transition.finished.finally(function () {
+                        running -= 1;
+                        if (running === 0) { window.webkit.messageHandlers.imarpTransition.postMessage(false); }
+                    });
+                    return transition;
+                };
+            }
             window.__imarpRead = function () {
                 var deck = window.__imarpDeck;
                 if (!deck) { return null; }
@@ -139,6 +161,7 @@ final class SlideContentView: UIView {
         )
         let messageProxy = WeakScriptMessageHandler()
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
+        configuration.userContentController.add(messageProxy, name: "imarpTransition")
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: frame)
         messageProxy.target = self
@@ -291,6 +314,11 @@ final class SlideContentView: UIView {
         settle(on: position)
     }
 
+    fileprivate func transitionReported(active: Bool) {
+        log("transition \(active ? "started" : "finished")")
+        onTransitionActiveChanged?(active)
+    }
+
     private static func position(from result: Any?) -> SlidePosition? {
         guard let values = result as? [Int], values.count == 2, values[0] >= 0 else { return nil }
         return SlidePosition(index: values[0], fragment: max(values[1], 0))
@@ -346,6 +374,11 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: SlideContentView?
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "imarpTransition" {
+            guard let active = message.body as? Bool else { return }
+            target?.transitionReported(active: active)
+            return
+        }
         guard let values = message.body as? [Int], values.count == 2, values[0] >= 0 else { return }
         target?.pageReported(SlidePosition(index: values[0], fragment: max(values[1], 0)))
     }
@@ -459,6 +492,9 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         // respects that setting like other PencilKit apps do.
         canvasView.drawingPolicy = .default
         canvasView.delegate = self
+        contentView.onTransitionActiveChanged = { [weak self] active in
+            self?.setInkSuppressedForTransition(active)
+        }
 
         addSubview(contentView)
         addSubview(canvasView)
@@ -529,6 +565,31 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         transform = transform.scaledBy(x: scale, y: scale)
         transform = transform.translatedBy(x: -source.minX, y: -source.minY)
         setDrawing(drawing.transformed(using: transform))
+    }
+
+    private var inkRevealFailsafe: DispatchWorkItem?
+
+    /// Ink belongs to one slide, so while a transition animates between two
+    /// slides it's hidden (the old slide's ink shouldn't ride along on the
+    /// outgoing slide, nor the new slide's appear before it has arrived),
+    /// then faded back in. Done with alpha rather than by swapping in an
+    /// empty drawing: on the iPad that would count as an edit and save over
+    /// the slide's ink. Independent of the hide-annotations toggle, which
+    /// uses isHidden.
+    private func setInkSuppressedForTransition(_ suppressed: Bool) {
+        inkRevealFailsafe?.cancel()
+        inkRevealFailsafe = nil
+        if suppressed {
+            canvasView.layer.removeAllAnimations()
+            canvasView.alpha = 0
+            // Never leave the ink hidden if the end of the transition is
+            // somehow never reported.
+            let failsafe = DispatchWorkItem { [weak self] in self?.setInkSuppressedForTransition(false) }
+            inkRevealFailsafe = failsafe
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: failsafe)
+        } else if canvasView.alpha < 1 {
+            UIView.animate(withDuration: 0.2) { self.canvasView.alpha = 1 }
+        }
     }
 
     func setDrawing(_ drawing: PKDrawing) {
