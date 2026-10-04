@@ -142,6 +142,26 @@ final class MainViewController: UIViewController {
             slideCanvas.setPointer(normalizedPoint: point, aspectRatio: PresentationStore.shared.slideAspectRatio)
         }
 
+        // The store (and so the external display, and which slide new ink
+        // belongs to) follows what this webview is actually showing, as
+        // reported by the page itself, not what was last requested.
+        slideCanvas.contentView.debugLabel = "ipad"
+        slideCanvas.contentView.onPositionChanged = { [weak self] position in
+            guard let self else { return }
+            let store = PresentationStore.shared
+            store.setCurrentPosition(position)
+            slideCanvas.setDrawing(store.drawing(for: position.index))
+            NotificationCenter.default.post(name: .slideIndexDidChange, object: nil)
+        }
+
+        // Coming back from another app, re-assert the slide the store says is
+        // current: the webview may have been reloaded meanwhile. Once it's
+        // confirmed there, onPositionChanged brings the ink and the external
+        // display along.
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.slideCanvas.show(PresentationStore.shared.currentPosition)
+        }
+
         registerExternalDisplayAccessory()
         reloadDeckFromStore()
     }
@@ -183,8 +203,8 @@ final class MainViewController: UIViewController {
 
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
-        slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory)
-        slideCanvas.configure(slideIndex: store.currentIndex, drawing: store.drawing(for: store.currentIndex))
+        slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory, at: store.currentPosition)
+        slideCanvas.configure(position: store.currentPosition, drawing: store.drawing(for: store.currentIndex))
     }
 
     @objc private func previousTapped() {
@@ -308,12 +328,8 @@ final class MainViewController: UIViewController {
 
     private func handleStepRequested(_ note: Notification) {
         guard let forward = note.userInfo?["forward"] as? Bool else { return }
-        slideCanvas.step(forward: forward) { [weak self] newIndex in
-            guard let self else { return }
-            let store = PresentationStore.shared
-            store.setCurrentIndex(newIndex)
-            slideCanvas.setDrawing(store.drawing(for: newIndex))
-        }
+        // The new position arrives through contentView.onPositionChanged.
+        slideCanvas.step(forward: forward)
     }
 }
 

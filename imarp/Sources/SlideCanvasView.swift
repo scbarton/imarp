@@ -9,8 +9,88 @@ import PencilKit
 /// *different* deck (see `load(htmlURL:directory:)`) does a full page load.
 final class SlideContentView: UIView {
     private let webView: WKWebView
-    private var pendingSlideIndex: Int?
     private var didFinishInitialLoad = false
+    private var loadedURL: URL?
+    private var loadedDirectory: URL?
+
+    /// Called with the position the page is *actually* showing whenever it
+    /// settles on one: after a step, once a `show(_:)` has really landed, or
+    /// if the page moves for any other reason. Anything tied to the visible
+    /// slide (which ink to display, what the other screen should show) keys
+    /// off this rather than off what was requested, since a request can be
+    /// overridden (e.g. by bespoke's own startup after a reload) or still be
+    /// mid-transition.
+    var onPositionChanged: ((SlidePosition) -> Void)?
+
+    /// Prefix for debug logging, so the two screens' logs can be told apart.
+    var debugLabel = "slides"
+
+    /// Last position reported or requested, so a page reload (e.g. after iOS
+    /// kills the web content process while the app is backgrounded) can land
+    /// back on it instead of slide 1.
+    private var lastKnownPosition = SlidePosition.start
+
+    /// Set by `show(_:)` until the page is confirmed to be there. While set,
+    /// positions the page reports on its own are not passed on: a freshly
+    /// (re)loaded page announces slide 1 before the jump takes effect, and
+    /// that must never be mistaken for where the presentation is.
+    private var targetPosition: SlidePosition?
+    private var verifyGeneration = 0
+
+    /// After a `show(_:)` lands, the page is held there for a few seconds:
+    /// bespoke's own startup (its URL-hash handling) can move a freshly
+    /// loaded page back to slide 1 *after* the jump took effect, so any move
+    /// the page makes on its own in that window is undone. A step by the
+    /// presenter ends the hold.
+    private var holdPosition: SlidePosition?
+    private var holdUntil = Date.distantPast
+
+    /// Marp's bespoke runtime keeps its deck object private, but its sync
+    /// plugin tags the deck with a `syncKey` property while setting up. This
+    /// runs before any page script, catches that one `defineProperty` call to
+    /// get hold of the deck, then puts the original back. With the deck in
+    /// hand, stepping and jumping go through bespoke's own API (the same
+    /// calls its presenter-view sync uses), and every slide/fragment change
+    /// is reported back to the app.
+    private static let deckHookScript = """
+        (function () {
+            var originalDefine = Object.defineProperty;
+            Object.defineProperty = function (target, property, descriptor) {
+                var result = originalDefine.apply(this, arguments);
+                if (property === 'syncKey' && target && typeof target.slide === 'function' && typeof target.on === 'function') {
+                    Object.defineProperty = originalDefine;
+                    window.__imarpDeck = target;
+                    target.on('fragment', function (event) {
+                        window.__imarpPosition = { index: event.index, fragment: event.fragmentIndex };
+                        window.webkit.messageHandlers.imarpPosition.postMessage([event.index, event.fragmentIndex]);
+                    });
+                }
+                return result;
+            };
+            window.__imarpRead = function () {
+                var deck = window.__imarpDeck;
+                if (!deck) { return null; }
+                var index = deck.slide();
+                var position = window.__imarpPosition;
+                return [index, (position && position.index === index) ? position.fragment : 0];
+            };
+            window.__imarpStep = function (forward) {
+                var deck = window.__imarpDeck;
+                if (!deck) { return false; }
+                if (forward) { deck.next(); } else { deck.prev(); }
+                return true;
+            };
+            window.__imarpGo = function (index, fragment) {
+                var deck = window.__imarpDeck;
+                if (!deck) { return null; }
+                var current = window.__imarpRead();
+                if (current[0] !== index || current[1] !== fragment) {
+                    deck.slide(index, { fragment: fragment });
+                }
+                return window.__imarpRead();
+            };
+        })();
+        """
 
     override init(frame: CGRect) {
         let configuration = WKWebViewConfiguration()
@@ -27,10 +107,16 @@ final class SlideContentView: UIView {
             document.head.appendChild(style);
             """
         configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.deckHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+        configuration.userContentController.addUserScript(
             WKUserScript(source: hideChromeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
+        let messageProxy = WeakScriptMessageHandler()
+        configuration.userContentController.add(messageProxy, name: "imarpPosition")
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: frame)
+        messageProxy.target = self
 
         backgroundColor = .black
         webView.scrollView.isScrollEnabled = false
@@ -51,64 +137,178 @@ final class SlideContentView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    private func log(_ message: String) {
+        #if DEBUG
+        print("[imarp \(debugLabel)] \(message)")
+        #endif
+    }
+
     /// Loads a deck (the bundled sample, or one opened from an
     /// `.marpbundle`), replacing whatever was previously shown.
-    func load(htmlURL: URL, directory: URL) {
+    func load(htmlURL: URL, directory: URL, at position: SlidePosition = .start) {
+        log("load \(htmlURL.lastPathComponent) at \(position)")
         didFinishInitialLoad = false
-        pendingSlideIndex = nil
-        webView.loadFileURL(htmlURL, allowingReadAccessTo: directory)
+        targetPosition = nil
+        holdPosition = nil
+        lastKnownPosition = position
+        loadedURL = htmlURL
+        loadedDirectory = directory
+        // Opening at the slide's own URL hash makes bespoke start on that
+        // slide itself, instead of starting on slide 1 and being moved.
+        var components = URLComponents(url: htmlURL, resolvingAgainstBaseURL: false)
+        components?.fragment = "\(position.index + 1)"
+        webView.loadFileURL(components?.url ?? htmlURL, allowingReadAccessTo: directory)
+        if position != .start { show(position) }
     }
 
-    /// Marp/bespoke slides are 1-indexed via `location.hash`. Jumping
-    /// directly by hash always resets that slide's fragments (incremental
-    /// bullet reveals) back to hidden, so this is only for landing on a
-    /// slide fresh — not for stepping through a live presentation. Use
-    /// `step(forward:completion:)` for that.
-    func showSlide(index: Int) {
-        guard didFinishInitialLoad else {
-            pendingSlideIndex = index
-            return
-        }
-        webView.evaluateJavaScript("location.hash = '\(index + 1)';")
+    /// Puts the deck at exactly `position` (slide and revealed fragments),
+    /// then keeps checking until it's really there. A no-op if it already is,
+    /// so calling it to re-assert the current position never disturbs the
+    /// revealed bullets.
+    func show(_ position: SlidePosition) {
+        log("show \(position) loaded=\(didFinishInitialLoad)")
+        lastKnownPosition = position
+        targetPosition = position
+        verifyGeneration += 1
+        guard didFinishInitialLoad else { return }
+        apply(position, generation: verifyGeneration, attemptsLeft: 12)
     }
 
-    /// Steps forward/back exactly as if the user pressed the arrow key —
-    /// this reuses Marp's own bespoke keyboard-navigation logic, which is
-    /// fragment-aware (reveals one bullet at a time before moving to the
-    /// next slide). There's no exposed JS API for this, so the same key
-    /// event a real keypress would produce is simulated instead, then the
-    /// resulting active slide's index is read back from the DOM.
-    func step(forward: Bool, completion: @escaping (Int) -> Void) {
-        guard didFinishInitialLoad else {
-            completion(0)
+    /// Asks bespoke to go to `position`, then checks shortly afterwards
+    /// (once any slide transition has had time to swap slides) and asks
+    /// again if it isn't there: bespoke may not be set up yet, or its own
+    /// startup may have reset it to slide 1 after the first request.
+    private func apply(_ position: SlidePosition, generation: Int, attemptsLeft: Int) {
+        webView.evaluateJavaScript("window.__imarpGo(\(position.index), \(position.fragment))") { [weak self] _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.verify(position, generation: generation, attemptsLeft: attemptsLeft)
+            }
+        }
+    }
+
+    private func verify(_ position: SlidePosition, generation: Int, attemptsLeft: Int) {
+        guard generation == verifyGeneration, targetPosition == position else { return }
+        webView.evaluateJavaScript("window.__imarpRead()") { [weak self] result, _ in
+            guard let self, generation == verifyGeneration, targetPosition == position else { return }
+            if let actual = Self.position(from: result), actual == position {
+                log("reached \(position)")
+                holdPosition = position
+                holdUntil = Date().addingTimeInterval(4)
+                settle(on: position)
+            } else if attemptsLeft > 0 {
+                log("not yet at \(position) (showing \(String(describing: Self.position(from: result)))), retrying")
+                apply(position, generation: generation, attemptsLeft: attemptsLeft - 1)
+            } else {
+                // Couldn't get there through bespoke (e.g. the deck changed
+                // and has fewer slides now): fall back to a plain hash jump
+                // and accept wherever the page reports it ends up.
+                log("giving up on \(position), hash jump")
+                targetPosition = nil
+                webView.evaluateJavaScript("location.hash = '\(position.index + 1)';")
+            }
+        }
+    }
+
+    private func settle(on position: SlidePosition) {
+        targetPosition = nil
+        lastKnownPosition = position
+        onPositionChanged?(position)
+    }
+
+    fileprivate func pageReported(_ position: SlidePosition) {
+        if let targetPosition {
+            if position == targetPosition {
+                log("reported \(position), target reached")
+                holdPosition = position
+                holdUntil = Date().addingTimeInterval(4)
+                settle(on: position)
+            } else {
+                log("reported \(position) while heading to \(targetPosition), ignored")
+            }
             return
         }
+        if let holdPosition, Date() < holdUntil, position != holdPosition {
+            log("reported \(position) while held at \(holdPosition), moving back")
+            show(holdPosition)
+            return
+        }
+        log("reported \(position)")
+        settle(on: position)
+    }
+
+    private static func position(from result: Any?) -> SlidePosition? {
+        guard let values = result as? [Int], values.count == 2, values[0] >= 0 else { return nil }
+        return SlidePosition(index: values[0], fragment: max(values[1], 0))
+    }
+
+    /// Steps forward/back exactly as the arrow keys would: fragment-aware,
+    /// revealing one bullet at a time before moving to the next slide. The
+    /// resulting position arrives through `onPositionChanged` once bespoke
+    /// has actually moved (with a slide transition, that's a moment later).
+    func step(forward: Bool) {
+        guard didFinishInitialLoad else { return }
+        log("step \(forward ? "forward" : "back")")
+        // The presenter is driving now; stop chasing or holding any earlier
+        // target.
+        targetPosition = nil
+        holdPosition = nil
+        verifyGeneration += 1
+        // Fallback for a page where the deck hook didn't take: simulate the
+        // key press, then read the active slide from the DOM once any
+        // transition has run. Each slide is an <svg data-marpit-svg>
+        // (bespoke toggles .bespoke-marp-active on it) wrapping a
+        // <section data-marpit-pagination="N">, N 1-indexed.
         let key = forward ? "ArrowRight" : "ArrowLeft"
-        // Each slide is an <svg data-marpit-svg> (bespoke toggles the
-        // .bespoke-marp-active class on it at runtime) wrapping a
-        // <section data-marpit-pagination="N"> — N is the 1-indexed slide
-        // number, present regardless of how deep marp-core nests things.
         let script = """
             (function () {
+                if (window.__imarpStep(\(forward))) { return true; }
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: '\(key)', bubbles: true }));
-                var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
-                var section = active ? active.querySelector('section[data-marpit-pagination]') : null;
-                return section ? parseInt(section.getAttribute('data-marpit-pagination'), 10) - 1 : -1;
+                return false;
             })();
             """
-        webView.evaluateJavaScript(script) { result, _ in
-            completion((result as? Int) ?? 0)
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            guard (result as? Bool) == false else { return }
+            self?.log("deck hook missing, keyboard fallback")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                let read = """
+                    (function () {
+                        var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
+                        var section = active ? active.querySelector('section[data-marpit-pagination]') : null;
+                        return section ? [parseInt(section.getAttribute('data-marpit-pagination'), 10) - 1, 0] : null;
+                    })();
+                    """
+                self?.webView.evaluateJavaScript(read) { [weak self] result, _ in
+                    if let position = Self.position(from: result) { self?.pageReported(position) }
+                }
+            }
         }
     }
+}
 
+/// WKUserContentController holds its message handlers strongly, which would
+/// keep the view (and its webview) alive forever; this breaks that cycle.
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: SlideContentView?
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let values = message.body as? [Int], values.count == 2, values[0] >= 0 else { return }
+        target?.pageReported(SlidePosition(index: values[0], fragment: max(values[1], 0)))
+    }
 }
 
 extension SlideContentView: WKNavigationDelegate {
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard let url = loadedURL, let directory = loadedDirectory else { return }
+        let position = lastKnownPosition
+        log("web content process terminated, reloading at \(position)")
+        load(htmlURL: url, directory: directory, at: position)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        log("didFinish")
         didFinishInitialLoad = true
-        if let index = pendingSlideIndex {
-            pendingSlideIndex = nil
-            showSlide(index: index)
+        if let targetPosition {
+            show(targetPosition)
         }
     }
 }
@@ -219,12 +419,12 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func loadDeck(htmlURL: URL, directory: URL) {
-        contentView.load(htmlURL: htmlURL, directory: directory)
+    func loadDeck(htmlURL: URL, directory: URL, at position: SlidePosition = .start) {
+        contentView.load(htmlURL: htmlURL, directory: directory, at: position)
     }
 
-    func configure(slideIndex: Int, drawing: PKDrawing) {
-        contentView.showSlide(index: slideIndex)
+    func configure(position: SlidePosition, drawing: PKDrawing) {
+        contentView.show(position)
         setDrawing(drawing)
     }
 
@@ -276,8 +476,12 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.setNeedsDisplay()
     }
 
-    func step(forward: Bool, completion: @escaping (Int) -> Void) {
-        contentView.step(forward: forward, completion: completion)
+    func show(_ position: SlidePosition) {
+        contentView.show(position)
+    }
+
+    func step(forward: Bool) {
+        contentView.step(forward: forward)
     }
 
     /// `normalizedPoint` is in the slide's own 0...1 x 0...1 space; `nil`

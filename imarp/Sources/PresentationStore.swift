@@ -2,18 +2,27 @@ import Foundation
 import PencilKit
 import UIKit
 
+/// Where a bespoke deck is: which slide, and how many of its fragments
+/// (incremental bullets) are revealed.
+struct SlidePosition: Equatable {
+    var index: Int
+    var fragment: Int
+
+    static let start = SlidePosition(index: 0, fragment: 0)
+}
+
 extension Notification.Name {
-    /// Posted (userInfo["forward"]: Bool) when Prev/Next is pressed. Both
-    /// the main and external-display scenes observe this and independently
-    /// step their own WKWebView via simulated arrow-key events, rather than
-    /// being told a target slide index — Marp's bespoke fragment stepping
-    /// (incremental bullet builds) only works correctly through its own
-    /// keyboard-navigation logic, since jumping via `location.hash` always
-    /// resets a slide's fragments back to hidden. Because both webviews
-    /// load the identical deck and receive the identical sequence of steps,
-    /// they stay in lockstep without needing to coordinate slide/fragment
-    /// state explicitly.
+    /// Posted (userInfo["forward"]: Bool) when Prev/Next is pressed. Only
+    /// the main scene steps its webview in response; it then records the
+    /// exact resulting slide and fragment in the store and posts
+    /// `.slideIndexDidChange`.
     static let stepRequested = Notification.Name("stepRequested")
+    /// Posted by the main scene after it has stepped (or re-asserted its
+    /// position) and recorded `PresentationStore.currentPosition`. The
+    /// external display follows it by jumping straight to that slide and
+    /// fragment, so the two screens can't drift apart by stepping twice or
+    /// missing a step.
+    static let slideIndexDidChange = Notification.Name("slideIndexDidChange")
     static let drawingDidChange = Notification.Name("drawingDidChange")
     /// Posted when a new deck has been loaded (see `PresentationStore.loadDeck`).
     /// Both scenes reload their own webview from the new deck's URL and
@@ -64,11 +73,11 @@ final class PresentationStore {
     private(set) var slideAspectRatio: CGFloat = 16.0 / 9.0
     private(set) var authoringCanvasSize: CGSize = .zero
 
-    /// Updated by the main scene once its step completes. Used only to
-    /// attribute freshly-drawn ink to the right slide — the external
-    /// display tracks its own current index locally, since it steps its
-    /// webview independently in response to `.stepRequested`.
-    private(set) var currentIndex = 0
+    /// Updated by the main scene once its step completes. The single source
+    /// of truth for what's on screen: the external display mirrors it, and
+    /// ink is always attributed to `currentIndex`.
+    private(set) var currentPosition = SlidePosition.start
+    var currentIndex: Int { currentPosition.index }
 
     private var drawings: [Int: PKDrawing] = [:]
 
@@ -121,7 +130,7 @@ final class PresentationStore {
         self.slideCount = slideCount
         self.slideAspectRatio = slideAspectRatio
         self.bundleURL = bundleURL
-        currentIndex = 0
+        currentPosition = .start
         drawings = [:]
         loadInkFromDisk()
         NotificationCenter.default.post(name: .deckDidChange, object: nil)
@@ -199,8 +208,8 @@ final class PresentationStore {
         authoringCanvasSize = size
     }
 
-    func setCurrentIndex(_ index: Int) {
-        currentIndex = index
+    func setCurrentPosition(_ position: SlidePosition) {
+        currentPosition = position
     }
 
     func setAnnotationsHidden(_ hidden: Bool) {

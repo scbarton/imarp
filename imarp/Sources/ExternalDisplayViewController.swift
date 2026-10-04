@@ -1,24 +1,37 @@
 import UIKit
+import PencilKit
 
 /// External-display-side UI: canvas only, no toolbar, no touch handling.
-/// Steps its own WKWebView in lockstep with the main scene by reacting to
-/// the same `.stepRequested` events (see PresentationStore) rather than
-/// being told a slide index — this keeps Marp's incremental bullet builds
-/// (fragments) correctly in sync between the two screens. Also mirrors
+/// Never steps on its own: after each step the main scene records the exact
+/// slide and fragment in `PresentationStore.currentPosition`, and this scene
+/// jumps straight there (with the deck's own slide transition). Also mirrors
 /// deck changes and ink-visibility toggles from the main scene, since the
 /// external display always shows exactly what the presenter sees.
 final class ExternalDisplayViewController: UIViewController {
     private let slideCanvas = SlideCanvasView()
 
-    /// Tracked locally rather than read from PresentationStore.currentIndex,
-    /// since this scene steps its webview independently of the main scene.
-    private var currentIndex = 0
+    /// The slide this screen is actually showing, for picking and matching
+    /// incoming ink updates to it. nil until the page has confirmed one
+    /// (e.g. just after the deck loads), so no ink is shown on a guess.
+    private var currentIndex: Int?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
 
         slideCanvas.isDrawingEnabled = false
+        // Ink follows the slide this screen is actually showing, as reported
+        // by its own page, so it can never belong to a different slide.
+        slideCanvas.contentView.debugLabel = "external"
+        slideCanvas.contentView.onPositionChanged = { [weak self] position in
+            guard let self else { return }
+            currentIndex = position.index
+            showRescaledDrawing(for: position.index)
+            // This screen only ever follows the iPad, so if its page moved
+            // anywhere else on its own, put it back.
+            let wanted = PresentationStore.shared.currentPosition
+            if position != wanted { slideCanvas.show(wanted) }
+        }
         slideCanvas.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(slideCanvas)
         NSLayoutConstraint.activate([
@@ -28,8 +41,8 @@ final class ExternalDisplayViewController: UIViewController {
             slideCanvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        NotificationCenter.default.addObserver(forName: .stepRequested, object: nil, queue: .main) { [weak self] note in
-            self?.handleStepRequested(note)
+        NotificationCenter.default.addObserver(forName: .slideIndexDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.followStore()
         }
         NotificationCenter.default.addObserver(forName: .deckDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.reloadDeckFromStore()
@@ -60,15 +73,19 @@ final class ExternalDisplayViewController: UIViewController {
         super.viewDidLayoutSubviews()
         // The rescale depends on this canvas's bounds, which aren't final when
         // the scene first connects — redo it once they are.
-        showRescaledDrawing(for: currentIndex)
+        if let currentIndex { showRescaledDrawing(for: currentIndex) }
     }
 
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
-        currentIndex = 0
-        slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory)
-        slideCanvas.contentView.showSlide(index: currentIndex)
-        showRescaledDrawing(for: currentIndex)
+        // Not hardcoded to 0: the scene can be recreated (e.g. after the app
+        // is backgrounded and returns) while the main screen is mid-deck.
+        // A genuinely new deck resets the store's index to 0 itself.
+        currentIndex = nil
+        slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory, at: store.currentPosition)
+        slideCanvas.show(store.currentPosition)
+        // Blank until the page confirms which slide it's on.
+        slideCanvas.setDrawing(PKDrawing())
     }
 
     /// Ink arrives in the iPad canvas's coordinate space, which is a different
@@ -83,13 +100,8 @@ final class ExternalDisplayViewController: UIViewController {
         )
     }
 
-    private func handleStepRequested(_ note: Notification) {
-        guard let forward = note.userInfo?["forward"] as? Bool else { return }
-        slideCanvas.step(forward: forward) { [weak self] newIndex in
-            guard let self else { return }
-            currentIndex = newIndex
-            showRescaledDrawing(for: newIndex)
-        }
+    private func followStore() {
+        slideCanvas.show(PresentationStore.shared.currentPosition)
     }
 
     @objc private func handleDrawingChanged(_ note: Notification) {
