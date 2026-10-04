@@ -55,7 +55,9 @@ final class MainViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        // Black, like the slide's letterbox bars, so the strip below the
+        // canvas (kept clear for the home indicator) doesn't show as a band.
+        view.backgroundColor = .black
 
         slideCanvas.isDrawingEnabled = true
         slideCanvas.onDrawingChanged = { [weak self] drawing in

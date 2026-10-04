@@ -44,6 +44,7 @@ final class SlideContentView: UIView {
     /// presenter ends the hold.
     private var holdPosition: SlidePosition?
     private var holdUntil = Date.distantPast
+    private var lastViewportSize: CGSize = .zero
 
     /// Marp's bespoke runtime keeps its deck object private, but its sync
     /// plugin tags the deck with a `syncKey` property while setting up. This
@@ -79,6 +80,30 @@ final class SlideContentView: UIView {
                 if (!deck) { return false; }
                 if (forward) { deck.next(); } else { deck.prev(); }
                 return true;
+            };
+            // Marp's page asks for width=device-width,height=device-height,
+            // which in a WKWebView means the *screen's* size, not the view's:
+            // on the iPad (view shorter than the screen) and on an external
+            // display that lays the slide out in the wrong box, shifting it
+            // from where the ink and pointer mapping expect it. The app sets
+            // the view's real size instead, and again whenever it changes.
+            window.__imarpSetViewport = function (width, height) {
+                var meta = document.querySelector('meta[name=viewport]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.setAttribute('name', 'viewport');
+                    document.head.appendChild(meta);
+                }
+                meta.setAttribute('content', 'width=' + width + ', height=' + height + ', initial-scale=1, maximum-scale=1, user-scalable=no');
+            };
+            window.__imarpGeometry = function () {
+                var svg = document.querySelector('svg[data-marpit-svg]');
+                if (!svg) { return [window.innerWidth, window.innerHeight]; }
+                var box = svg.getBoundingClientRect();
+                var viewBox = svg.viewBox.baseVal;
+                var scale = Math.min(box.width / viewBox.width, box.height / viewBox.height);
+                var width = viewBox.width * scale, height = viewBox.height * scale;
+                return [window.innerWidth, window.innerHeight, box.left + (box.width - width) / 2, box.top + (box.height - height) / 2, width, height];
             };
             window.__imarpGo = function (index, fragment) {
                 var deck = window.__imarpDeck;
@@ -121,6 +146,11 @@ final class SlideContentView: UIView {
         backgroundColor = .black
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.bounces = false
+        // Otherwise the page is inset by the window's safe area (overscan on
+        // some external displays), shifting the slide away from where
+        // `SlideCanvasView.slideRect(in:aspectRatio:)` says it is and so
+        // putting ink and the pointer off target.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.navigationDelegate = self
@@ -150,6 +180,7 @@ final class SlideContentView: UIView {
         didFinishInitialLoad = false
         targetPosition = nil
         holdPosition = nil
+        lastViewportSize = .zero
         lastKnownPosition = position
         loadedURL = htmlURL
         loadedDirectory = directory
@@ -159,6 +190,30 @@ final class SlideContentView: UIView {
         components?.fragment = "\(position.index + 1)"
         webView.loadFileURL(components?.url ?? htmlURL, allowingReadAccessTo: directory)
         if position != .start { show(position) }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateViewport()
+    }
+
+    private func updateViewport() {
+        let size = webView.bounds.size
+        guard didFinishInitialLoad, size.width > 0, size.height > 0, size != lastViewportSize else { return }
+        lastViewportSize = size
+        webView.evaluateJavaScript("window.__imarpSetViewport(\(Int(size.width.rounded())), \(Int(size.height.rounded())))") { [weak self] _, _ in
+            self?.logGeometry()
+        }
+    }
+
+    private func logGeometry() {
+        #if DEBUG
+        let bounds = webView.bounds.size
+        webView.evaluateJavaScript("window.__imarpGeometry()") { [weak self] result, _ in
+            let values = (result as? [Double])?.map { String(format: "%.1f", $0) }.joined(separator: ", ") ?? "?"
+            self?.log("geometry view=\(bounds) page[innerW, innerH, slideX, slideY, slideW, slideH]=[\(values)]")
+        }
+        #endif
     }
 
     /// Puts the deck at exactly `position` (slide and revealed fragments),
@@ -307,6 +362,7 @@ extension SlideContentView: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log("didFinish")
         didFinishInitialLoad = true
+        updateViewport()
         if let targetPosition {
             show(targetPosition)
         }
@@ -390,6 +446,14 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.translatesAutoresizingMaskIntoConstraints = false
         pointerDotView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.backgroundColor = .clear
+        // PKCanvasView is a scroll view, and strokes are stored in its
+        // content coordinates. Left to itself it can pick up an automatic
+        // content inset (and a matching scroll offset), which silently
+        // shifts every stored stroke relative to the slide underneath, so
+        // the same ink then lands a few points off on the other screen.
+        // Pin content coordinates to the view's own.
+        canvasView.contentInsetAdjustmentBehavior = .never
+        canvasView.isScrollEnabled = false
         // .anyInput would always allow finger drawing regardless of the
         // user's system-wide "Only Draw with Apple Pencil" setting; .default
         // respects that setting like other PencilKit apps do.
@@ -504,7 +568,15 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         ))
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if canvasView.contentOffset != .zero { canvasView.contentOffset = .zero }
+    }
+
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        #if DEBUG
+        print("[imarp ink] canvas frame=\(canvasView.frame) offset=\(canvasView.contentOffset) inset=\(canvasView.adjustedContentInset) drawing bounds=\(canvasView.drawing.bounds)")
+        #endif
         onDrawingChanged?(canvasView.drawing)
     }
 }

@@ -131,14 +131,26 @@ enum MarpBundleLoader {
     /// each screen letterboxes the slide to fit its own bounds, so ink drawn
     /// on the iPad has to be mapped slide-to-slide — not canvas-to-canvas — to
     /// land in the right place on a differently-shaped external display.
-    /// Falls back to Marp's own 16:9 default.
+    /// Only the slide `<svg data-marpit-svg …>` tag itself is read: the first
+    /// `viewBox` in the file can belong to something else entirely (an
+    /// inline SVG image or icon), and taking its shape for the slide's sends
+    /// ink to the wrong place on the external display. Falls back to Marp's
+    /// own 16:9 default.
     static func slideAspectRatio(in html: String) -> CGFloat {
         let fallback: CGFloat = 16.0 / 9.0
-        guard let range = html.range(of: "viewBox=\"0 0 ") else { return fallback }
-        let numbers = html[range.upperBound...].prefix(while: { $0.isNumber || $0 == " " || $0 == "." })
+        guard let slideTag = html.range(of: "data-marpit-svg") else { return fallback }
+        let tagEnd = html[slideTag.upperBound...].firstIndex(of: ">") ?? html.endIndex
+        guard let range = html.range(of: "viewBox=\"", range: slideTag.upperBound..<tagEnd)
+                ?? html[..<slideTag.lowerBound].range(of: "viewBox=\"", options: .backwards).flatMap({ found in
+                    // Attribute written before data-marpit-svg in the same tag.
+                    html[found.upperBound..<slideTag.lowerBound].contains("<") ? nil : found
+                })
+        else { return fallback }
+        let numbers = html[range.upperBound...].prefix(while: { $0.isNumber || $0 == " " || $0 == "." || $0 == "-" })
+        // viewBox is "minX minY width height".
         let parts = numbers.split(separator: " ").compactMap { Double($0) }
-        guard parts.count >= 2, parts[0] > 0, parts[1] > 0 else { return fallback }
-        return CGFloat(parts[0] / parts[1])
+        guard parts.count == 4, parts[2] > 0, parts[3] > 0 else { return fallback }
+        return CGFloat(parts[2] / parts[3])
     }
 
     private static func sourceIsNewer(_ source: URL, than rendered: URL) -> Bool {

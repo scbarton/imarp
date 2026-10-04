@@ -34,11 +34,15 @@ final class ExternalDisplayViewController: UIViewController {
         }
         slideCanvas.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(slideCanvas)
+        // Inside the safe area, so a display that reports overscan insets
+        // keeps the whole slide visible, and the canvas's bounds are exactly
+        // the area the slide (and so the rescaled ink) is laid out in.
+        let safeArea = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            slideCanvas.topAnchor.constraint(equalTo: view.topAnchor),
-            slideCanvas.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            slideCanvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            slideCanvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            slideCanvas.topAnchor.constraint(equalTo: safeArea.topAnchor),
+            slideCanvas.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
+            slideCanvas.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
+            slideCanvas.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
         ])
 
         NotificationCenter.default.addObserver(forName: .slideIndexDidChange, object: nil, queue: .main) { [weak self] _ in

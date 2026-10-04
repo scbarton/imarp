@@ -129,6 +129,9 @@ final class PresentationStore {
         deckDirectory = directory
         self.slideCount = slideCount
         self.slideAspectRatio = slideAspectRatio
+        #if DEBUG
+        print("[imarp store] loaded \(htmlURL.lastPathComponent): \(slideCount) slides, aspect \(slideAspectRatio)")
+        #endif
         self.bundleURL = bundleURL
         currentPosition = .start
         drawings = [:]
