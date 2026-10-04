@@ -61,7 +61,7 @@ final class SlideContentView: UIView {
     /// hand, stepping and jumping go through bespoke's own API (the same
     /// calls its presenter-view sync uses), and every slide/fragment change
     /// is reported back to the app.
-    private static let deckHookScript = """
+    static let deckHookScript = """
         (function () {
             var originalDefine = Object.defineProperty;
             Object.defineProperty = function (target, property, descriptor) {
@@ -705,17 +705,25 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     /// maps the source slide rect onto this canvas's slide rect so a stroke
     /// stays over the same part of the slide on both screens.
     func setDrawing(_ drawing: PKDrawing, authoredOnCanvasOfSize sourceSize: CGSize, aspectRatio: CGFloat) {
-        let source = Self.slideRect(in: sourceSize, aspectRatio: aspectRatio)
-        let destination = Self.slideRect(in: bounds.size, aspectRatio: aspectRatio)
-        guard source.width > 0, destination.width > 0 else {
+        guard let transform = Self.inkTransform(from: sourceSize, to: bounds.size, aspectRatio: aspectRatio) else {
             setDrawing(drawing)
             return
         }
+        setDrawing(drawing.transformed(using: transform))
+    }
+
+    /// Maps ink drawn on a canvas of `sourceSize` onto one of
+    /// `destinationSize`, slide rect to slide rect, so a stroke stays over the
+    /// same part of the slide. nil if either size is empty.
+    static func inkTransform(from sourceSize: CGSize, to destinationSize: CGSize, aspectRatio: CGFloat) -> CGAffineTransform? {
+        let source = slideRect(in: sourceSize, aspectRatio: aspectRatio)
+        let destination = slideRect(in: destinationSize, aspectRatio: aspectRatio)
+        guard source.width > 0, destination.width > 0 else { return nil }
         let scale = destination.width / source.width
         var transform = CGAffineTransform(translationX: destination.minX, y: destination.minY)
         transform = transform.scaledBy(x: scale, y: scale)
         transform = transform.translatedBy(x: -source.minX, y: -source.minY)
-        setDrawing(drawing.transformed(using: transform))
+        return transform
     }
 
     private var inkRevealFailsafe: DispatchWorkItem?

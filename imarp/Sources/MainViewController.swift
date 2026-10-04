@@ -331,8 +331,7 @@ final class MainViewController: UIViewController {
     }
 
     @objc private func exportTapped() {
-        let pageSize = slideCanvas.bounds.size
-        PDFExporter.export(pageSize: pageSize) { [weak self] url in
+        PDFExporter.export { [weak self] url in
             guard let self, let url else { return }
             let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
             if let popover = activity.popoverPresentationController {

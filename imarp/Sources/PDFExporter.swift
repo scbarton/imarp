@@ -8,12 +8,15 @@ import PencilKit
 /// often stops rendering and produces blank snapshots) so export doesn't
 /// visibly flip through slides on screen.
 ///
-/// Exports each slide in its fully-built state (all incremental bullets
-/// revealed), not one page per build step. Jumping straight to a slide via
-/// `location.hash` always resets its fragments to hidden, so after jumping,
-/// this reveals exactly that slide's own fragment count via simulated
-/// forward keypresses — bounded and safe, since it never steps more times
-/// than the slide has fragments (which would spill into the next slide).
+/// Each page is exactly one slide (1280 points wide, at the deck's own
+/// aspect ratio), with no letterbox bars. The webview gets the same deck
+/// hook and viewport fix as the on-screen slides (see SlideContentView):
+/// without the viewport fix, Marp's `height=device-height` lays the slide
+/// out against the screen's height rather than the page's, shifting it away
+/// from the ink. Slides are opened through bespoke's own API with slide
+/// transitions skipped (otherwise a snapshot can catch one mid-animation)
+/// and every incremental bullet revealed, so each page shows the slide in
+/// its fully built state.
 ///
 /// Every composited page image is collected into an array first, and the
 /// actual PDF is only assembled at the very end in one synchronous pass via
@@ -26,7 +29,43 @@ import PencilKit
 /// disturbing that stack in between. Doing all the drawing synchronously,
 /// after every async step has already finished, avoids that entirely.
 enum PDFExporter {
-    static func export(pageSize: CGSize, completion: @escaping (URL?) -> Void) {
+    static let pageWidth: CGFloat = 1280
+
+    /// Waits for bespoke to finish setting up (the deck hook has captured the
+    /// deck), then sizes the page's viewport to the webview.
+    private static let prepareScript = """
+        for (var i = 0; i < 60 && !window.__imarpDeck; i++) {
+            await new Promise(function (resolve) { setTimeout(resolve, 50); });
+        }
+        window.__imarpSetViewport(width, height);
+        await new Promise(function (resolve) { setTimeout(resolve, 150); });
+        return !!window.__imarpDeck;
+        """
+
+    /// Puts slide `index` on screen with all its fragments revealed, then
+    /// waits for fonts and a repaint. Falls back to a hash jump plus
+    /// simulated key presses for a page without the deck hook.
+    private static let showSlideScript = """
+        var deck = window.__imarpDeck;
+        if (deck) {
+            deck.skipTransition = true;
+            deck.slide(index, { fragment: -1 });
+        } else {
+            location.hash = String(index + 1);
+            await new Promise(function (resolve) { setTimeout(resolve, 200); });
+            var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
+            var section = active ? active.querySelector('section[data-marpit-fragments]') : null;
+            var count = section ? parseInt(section.getAttribute('data-marpit-fragments'), 10) : 0;
+            for (var i = 0; i < count; i++) {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            }
+        }
+        if (document.fonts) { await document.fonts.ready; }
+        await new Promise(function (resolve) { setTimeout(resolve, 120); });
+        return true;
+        """
+
+    static func export(completion: @escaping (URL?) -> Void) {
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.windows.first })
             .first
@@ -36,6 +75,13 @@ enum PDFExporter {
         }
 
         let store = PresentationStore.shared
+        let aspectRatio = store.slideAspectRatio > 0 ? store.slideAspectRatio : 16.0 / 9.0
+        let pageSize = CGSize(width: pageWidth, height: (pageWidth / aspectRatio).rounded())
+        let pageRect = CGRect(origin: .zero, size: pageSize)
+        let inkTransform = SlideCanvasView.inkTransform(
+            from: store.authoringCanvasSize, to: pageSize, aspectRatio: aspectRatio
+        )
+
         let hostFrame = CGRect(x: window.bounds.width + 100, y: 0, width: pageSize.width, height: pageSize.height)
         // Marp's bespoke output ships its own on-screen page controls and a
         // fullscreen toggle (see SlideContentView) — hide them here too, or
@@ -47,34 +93,35 @@ enum PDFExporter {
             document.head.appendChild(style);
             """
         configuration.userContentController.addUserScript(
+            WKUserScript(source: SlideContentView.deckHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+        configuration.userContentController.addUserScript(
             WKUserScript(source: hideChromeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
+        // The deck hook reports positions, transitions and the overview
+        // through these; nothing here needs them, but posting to a handler
+        // that isn't registered would throw inside the page.
+        let sink = IgnoredScriptMessages()
+        for name in ["imarpPosition", "imarpTransition", "imarpOverview"] {
+            configuration.userContentController.add(sink, name: name)
+        }
         let webView = WKWebView(frame: hostFrame, configuration: configuration)
         webView.scrollView.isScrollEnabled = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.isOpaque = false
         webView.backgroundColor = .black
         window.addSubview(webView)
 
         webView.loadFileURL(store.deckHTMLURL, allowingReadAccessTo: store.deckDirectory)
 
-        let pageRect = CGRect(origin: .zero, size: pageSize)
         var pageImages: [UIImage] = []
 
         func finish(_ url: URL?) {
             webView.removeFromSuperview()
+            for name in ["imarpPosition", "imarpTransition", "imarpOverview"] {
+                configuration.userContentController.removeScriptMessageHandler(forName: name)
+            }
             completion(url)
-        }
-
-        func revealFragments(remaining: Int, then: @escaping () -> Void) {
-            guard remaining > 0 else {
-                then()
-                return
-            }
-            webView.evaluateJavaScript(
-                "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));"
-            ) { _, _ in
-                revealFragments(remaining: remaining - 1, then: then)
-            }
         }
 
         func writeFinalPDF() {
@@ -104,34 +151,19 @@ enum PDFExporter {
                 writeFinalPDF()
                 return
             }
-            webView.evaluateJavaScript("location.hash = '\(index + 1)';") { _, _ in
-                // Hash navigation is a DOM update, not a full load; give the
-                // page a beat to repaint before reading its fragment count.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    let fragmentCountScript = """
-                        (function () {
-                            var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
-                            var section = active ? active.querySelector('section[data-marpit-fragments]') : null;
-                            return section ? parseInt(section.getAttribute('data-marpit-fragments'), 10) : 0;
-                        })();
-                        """
-                    webView.evaluateJavaScript(fragmentCountScript) { result, _ in
-                        let fragmentCount = (result as? Int) ?? 0
-                        revealFragments(remaining: fragmentCount) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                webView.takeSnapshot(with: nil) { image, _ in
-                                    let drawing = store.drawing(for: index)
-                                    let inkImage = drawing.image(from: pageRect, scale: UIScreen.main.scale)
-                                    let composited = UIGraphicsImageRenderer(size: pageSize).image { _ in
-                                        image?.draw(in: pageRect)
-                                        inkImage.draw(in: pageRect)
-                                    }
-                                    pageImages.append(composited)
-                                    renderSlide(index + 1)
-                                }
-                            }
-                        }
+            webView.callAsyncJavaScript(showSlideScript, arguments: ["index": index], in: nil, in: .page) { _ in
+                webView.takeSnapshot(with: nil) { image, _ in
+                    var drawing = store.drawing(for: index)
+                    if let inkTransform {
+                        drawing = drawing.transformed(using: inkTransform)
                     }
+                    let inkImage = drawing.image(from: pageRect, scale: UIScreen.main.scale)
+                    let composited = UIGraphicsImageRenderer(size: pageSize).image { _ in
+                        image?.draw(in: pageRect)
+                        inkImage.draw(in: pageRect)
+                    }
+                    pageImages.append(composited)
+                    renderSlide(index + 1)
                 }
             }
         }
@@ -140,7 +172,14 @@ enum PDFExporter {
         loadObservation = webView.observe(\.isLoading) { wv, _ in
             guard !wv.isLoading else { return }
             loadObservation?.invalidate()
-            renderSlide(0)
+            let size = ["width": Int(pageSize.width), "height": Int(pageSize.height)]
+            wv.callAsyncJavaScript(prepareScript, arguments: size, in: nil, in: .page) { _ in
+                renderSlide(0)
+            }
         }
     }
+}
+
+private final class IgnoredScriptMessages: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {}
 }
