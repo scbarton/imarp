@@ -36,12 +36,18 @@ final class MainViewController: UIViewController {
     /// view currently holds focus, so no pairing/setup step is needed beyond
     /// plugging the clicker in.
     override var keyCommands: [UIKeyCommand]? {
+        let escape = UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(slidesTapped))
+        // While the slide overview is open, leave the arrow keys to it (they
+        // move the selection around its grid) instead of stepping the deck
+        // hidden behind it.
+        guard !slideCanvas.isOverviewOpen else { return [escape] }
         // Plain arrow keys are claimed by iPadOS's focus-navigation system
         // (moving focus between the toolbar's buttons) before they'd
         // otherwise reach these key commands — wantsPriorityOverSystemBehavior
         // opts back in. Space isn't used for focus movement, so it worked
         // without this.
-        [
+        return [
+            escape,
             UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [], action: #selector(nextTapped)),
             UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(nextTapped)),
             UIKeyCommand(input: " ", modifierFlags: [], action: #selector(nextTapped)),
@@ -87,6 +93,7 @@ final class MainViewController: UIViewController {
             pointerItem,
             UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
             UIBarButtonItem(title: "◀ Prev", style: .plain, target: self, action: #selector(previousTapped)),
+            UIBarButtonItem(title: "Slides", style: .plain, target: self, action: #selector(slidesTapped)),
             UIBarButtonItem(title: "Next ▶", style: .plain, target: self, action: #selector(nextTapped)),
             UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
             hideButton,
@@ -213,6 +220,13 @@ final class MainViewController: UIViewController {
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": false])
     }
 
+    /// Opens (or closes) Marp's slide overview, a grid of every slide; tapping
+    /// one jumps there and closes it. Only on the iPad: the external display
+    /// stays on the current slide until a new one is picked, then follows.
+    @objc private func slidesTapped() {
+        slideCanvas.setOverviewOpen(!slideCanvas.isOverviewOpen)
+    }
+
     @objc private func nextTapped() {
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": true])
     }
@@ -301,7 +315,7 @@ final class MainViewController: UIViewController {
         let hidden = !store.annotationsHidden
         store.setAnnotationsHidden(hidden)
         hideAnnotationsButton?.title = hidden ? "Show Ink" : "Hide Ink"
-        slideCanvas.canvasView.isHidden = hidden
+        slideCanvas.annotationsHidden = hidden
     }
 
     @objc private func openTapped() {
@@ -330,6 +344,8 @@ final class MainViewController: UIViewController {
 
     private func handleStepRequested(_ note: Notification) {
         guard let forward = note.userInfo?["forward"] as? Bool else { return }
+        // Don't step the deck hidden behind the slide overview.
+        guard !slideCanvas.isOverviewOpen else { return }
         // The new position arrives through contentView.onPositionChanged.
         slideCanvas.step(forward: forward)
     }

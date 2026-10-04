@@ -53,7 +53,7 @@ final class ExternalDisplayViewController: UIViewController {
         }
         NotificationCenter.default.addObserver(forName: .annotationsHiddenDidChange, object: nil, queue: .main) { [weak self] note in
             guard let hidden = note.userInfo?["hidden"] as? Bool else { return }
-            self?.slideCanvas.canvasView.isHidden = hidden
+            self?.slideCanvas.annotationsHidden = hidden
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleDrawingChanged(_:)),
@@ -69,7 +69,7 @@ final class ExternalDisplayViewController: UIViewController {
             self?.slideCanvas.setPointer(normalizedPoint: nil, aspectRatio: 0)
         }
 
-        slideCanvas.canvasView.isHidden = PresentationStore.shared.annotationsHidden
+        slideCanvas.annotationsHidden = PresentationStore.shared.annotationsHidden
         reloadDeckFromStore()
     }
 

@@ -26,6 +26,10 @@ final class SlideContentView: UIView {
     /// once it has finished.
     var onTransitionActiveChanged: ((Bool) -> Void)?
 
+    /// Called when Marp's slide overview opens or closes.
+    var onOverviewChanged: ((Bool) -> Void)?
+    private(set) var isOverviewOpen = false
+
     /// Prefix for debug logging, so the two screens' logs can be told apart.
     var debugLabel = "slides"
 
@@ -90,6 +94,48 @@ final class SlideContentView: UIView {
                     return transition;
                 };
             }
+            // marp-cli's slide overview (a grid of every slide, opened with
+            // Esc/o or deck.toggleOverviewView) lives in an overlay <div
+            // class="bespoke-marp-overview" data-open="1|">; report when it
+            // opens and closes, however that happened (picking a slide
+            // closes it from inside the overview's own iframe).
+            window.__imarpOverviewOpen = false;
+            document.addEventListener('DOMContentLoaded', function () {
+                new MutationObserver(function () {
+                    var overview = document.querySelector('.bespoke-marp-overview');
+                    var open = !!(overview && overview.dataset.open);
+                    if (open !== window.__imarpOverviewOpen) {
+                        window.__imarpOverviewOpen = open;
+                        window.webkit.messageHandlers.imarpOverview.postMessage(open);
+                        // The overview's iframe is kept between openings, so
+                        // tell it which slide is current each time.
+                        var frame = open && overview.querySelector('iframe');
+                        if (frame && frame.contentWindow && window.__imarpDeck) {
+                            frame.contentWindow.postMessage({ imarpCurrentSlide: window.__imarpDeck.slide() }, '*');
+                        }
+                    }
+                }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-open'] });
+            });
+            // Picks from the overview (see overviewFrameScript). Marp links the
+            // overview to the slideshow through localStorage, which doesn't
+            // carry between frames of a page loaded from a file, so the pick
+            // is relayed with postMessage and applied here instead.
+            window.addEventListener('message', function (event) {
+                var data = event.data;
+                var deck = window.__imarpDeck;
+                if (!data || typeof data !== 'object' || !deck) { return; }
+                if (typeof data.imarpOverviewSelect === 'number') {
+                    deck.slide(data.imarpOverviewSelect, { fragment: -1 });
+                } else if (data.imarpOverviewReady && event.source) {
+                    event.source.postMessage({ imarpCurrentSlide: deck.slide() }, '*');
+                }
+            });
+            window.__imarpToggleOverview = function (open) {
+                var deck = window.__imarpDeck;
+                if (!deck || typeof deck.toggleOverviewView !== 'function') { return false; }
+                deck.toggleOverviewView(open);
+                return true;
+            };
             window.__imarpRead = function () {
                 var deck = window.__imarpDeck;
                 if (!deck) { return null; }
@@ -139,6 +185,48 @@ final class SlideContentView: UIView {
         })();
         """
 
+    /// Runs inside marp-cli's slide overview, which is an iframe of the same
+    /// deck in `?view=overview` mode (and does nothing in any other frame).
+    /// Relays the slide the presenter picks to the slideshow page with
+    /// postMessage, and takes the current slide from it so the grid starts
+    /// on the right one; see the message listener in `deckHookScript`.
+    private static let overviewFrameScript = """
+        (function () {
+            if (window === window.top || !/[?&]view=overview/.test(location.search)) { return; }
+            var originalDefine = Object.defineProperty;
+            Object.defineProperty = function (target, property, descriptor) {
+                var result = originalDefine.apply(this, arguments);
+                if (property === 'syncKey' && target && typeof target.slide === 'function') {
+                    Object.defineProperty = originalDefine;
+                    window.__imarpOverviewDeck = target;
+                }
+                return result;
+            };
+            function slideIndex(element) {
+                var svg = element && element.closest && element.closest('svg[data-marpit-svg]');
+                if (!svg) { return -1; }
+                return Array.prototype.indexOf.call(document.querySelectorAll('svg[data-marpit-svg]'), svg);
+            }
+            function pick(index) {
+                if (index >= 0) { window.parent.postMessage({ imarpOverviewSelect: index }, '*'); }
+            }
+            document.addEventListener('click', function (event) { pick(slideIndex(event.target)); }, true);
+            document.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter' || event.key === ' ') { pick(slideIndex(document.activeElement)); }
+            }, true);
+            window.addEventListener('message', function (event) {
+                var data = event.data;
+                var deck = window.__imarpOverviewDeck;
+                if (data && typeof data.imarpCurrentSlide === 'number' && deck) {
+                    deck.slide(data.imarpCurrentSlide, { fragment: -1 });
+                }
+            });
+            window.addEventListener('load', function () {
+                window.parent.postMessage({ imarpOverviewReady: true }, '*');
+            });
+        })();
+        """
+
     override init(frame: CGRect) {
         let configuration = WKWebViewConfiguration()
         // Marp's bespoke output ships its own on-screen page controls and a
@@ -157,11 +245,15 @@ final class SlideContentView: UIView {
             WKUserScript(source: Self.deckHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.overviewFrameScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+        configuration.userContentController.addUserScript(
             WKUserScript(source: hideChromeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         let messageProxy = WeakScriptMessageHandler()
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
         configuration.userContentController.add(messageProxy, name: "imarpTransition")
+        configuration.userContentController.add(messageProxy, name: "imarpOverview")
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: frame)
         messageProxy.target = self
@@ -203,6 +295,10 @@ final class SlideContentView: UIView {
         didFinishInitialLoad = false
         targetPosition = nil
         holdPosition = nil
+        if isOverviewOpen {
+            isOverviewOpen = false
+            onOverviewChanged?(false)
+        }
         lastViewportSize = .zero
         lastKnownPosition = position
         loadedURL = htmlURL
@@ -314,6 +410,27 @@ final class SlideContentView: UIView {
         settle(on: position)
     }
 
+    /// Opens or closes Marp's slide overview. Only decks rendered with a
+    /// marp-cli 4.5+ shell have one; on anything older this does nothing.
+    func setOverviewOpen(_ open: Bool) {
+        guard didFinishInitialLoad else { return }
+        webView.evaluateJavaScript("window.__imarpToggleOverview(\(open))") { [weak self] result, _ in
+            if (result as? Bool) != true { self?.log("deck has no slide overview") }
+        }
+    }
+
+    fileprivate func overviewReported(open: Bool) {
+        log("overview \(open ? "opened" : "closed")")
+        isOverviewOpen = open
+        // Picking a slide in the overview moves the deck on its own, which
+        // must not be undone as an unrequested move.
+        if open {
+            holdPosition = nil
+            targetPosition = nil
+        }
+        onOverviewChanged?(open)
+    }
+
     fileprivate func transitionReported(active: Bool) {
         log("transition \(active ? "started" : "finished")")
         onTransitionActiveChanged?(active)
@@ -374,6 +491,11 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: SlideContentView?
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "imarpOverview" {
+            guard let open = message.body as? Bool else { return }
+            target?.overviewReported(open: open)
+            return
+        }
         if message.name == "imarpTransition" {
             guard let active = message.body as? Bool else { return }
             target?.transitionReported(active: active)
@@ -468,7 +590,31 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     let pointerDotView = PointerDotView()
 
     var isDrawingEnabled: Bool = true {
-        didSet { canvasView.isUserInteractionEnabled = isDrawingEnabled }
+        didSet { updateInkLayer() }
+    }
+
+    /// The presenter's hide-ink toggle.
+    var annotationsHidden = false {
+        didSet { updateInkLayer() }
+    }
+
+    /// While Marp's slide overview is up, the ink layer gets out of the way:
+    /// it belongs to one slide, not to the grid, and taps have to reach the
+    /// overview underneath rather than draw.
+    private var overviewShowing = false {
+        didSet { updateInkLayer() }
+    }
+
+    var isOverviewOpen: Bool { contentView.isOverviewOpen }
+    var onOverviewChanged: ((Bool) -> Void)?
+
+    private func updateInkLayer() {
+        canvasView.isHidden = annotationsHidden || overviewShowing
+        canvasView.isUserInteractionEnabled = isDrawingEnabled && !overviewShowing
+    }
+
+    func setOverviewOpen(_ open: Bool) {
+        contentView.setOverviewOpen(open)
     }
 
     var onDrawingChanged: ((PKDrawing) -> Void)?
@@ -494,6 +640,11 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.delegate = self
         contentView.onTransitionActiveChanged = { [weak self] active in
             self?.setInkSuppressedForTransition(active)
+        }
+        contentView.onOverviewChanged = { [weak self] open in
+            guard let self else { return }
+            overviewShowing = open
+            onOverviewChanged?(open)
         }
 
         addSubview(contentView)
