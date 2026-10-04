@@ -168,7 +168,16 @@ final class MainViewController: UIViewController {
         // confirmed there, onPositionChanged brings the ink and the external
         // display along.
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.slideCanvas.show(PresentationStore.shared.currentPosition)
+            guard let self else { return }
+            slideCanvas.show(PresentationStore.shared.currentPosition)
+            restoreToolPicker()
+        }
+
+        // The slide overview takes keyboard focus (and so first responder)
+        // while it's open, which hides the PencilKit tool picker; hand it back
+        // to the canvas once the overview closes.
+        slideCanvas.onOverviewChanged = { [weak self] open in
+            if !open { self?.restoreToolPicker() }
         }
 
         registerExternalDisplayAccessory()
@@ -208,6 +217,15 @@ final class MainViewController: UIViewController {
         toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
         slideCanvas.canvasView.becomeFirstResponder()
         updatePresentButtonTitle()
+    }
+
+    /// The tool picker is only shown while the canvas is first responder, so
+    /// anything else that takes first responder (the slide overview's web
+    /// content, a dismissed sheet) leaves it hidden until this runs.
+    private func restoreToolPicker() {
+        guard !slideCanvas.isOverviewOpen else { return }
+        toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
+        slideCanvas.canvasView.becomeFirstResponder()
     }
 
     private func reloadDeckFromStore() {
