@@ -16,6 +16,21 @@ without ever touching a Mac.
   `<!--IMARP_STYLE-->`. Splice in `MarpEngine.render()`'s `html`/`css` output
   at those markers to get a fully interactive presentation page.
 
+Regenerating the shell (e.g. for a newer `marp-cli`; currently 4.5.1, which
+added the slide overview opened with Esc or `o`):
+
+```sh
+cd shell-src
+marp placeholder.md -o shell_raw.html
+python make_shell.py shell_raw.html ../shell.html
+cp ../shell.html ../../imarp/Resources/MarpEngine/shell.html
+```
+
+Keep `marp-core` here at the version that `marp-cli` bundles (`marp
+--version` shows both) so the rendered slides match the shell's CSS. Decks
+whose cached `source.html` came from a different shell are re-rendered
+automatically when opened (see `MarpBundleLoader.load`).
+
 Key detail: `marp-core`'s default output isn't scoped to marp-cli's
 container id, so it won't match the shell's CSS. Render with:
 

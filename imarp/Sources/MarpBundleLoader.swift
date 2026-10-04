@@ -53,12 +53,15 @@ enum MarpBundleLoader {
         let hasMarkdown = fm.fileExists(atPath: sourceMDURL.path)
         let hasHTML = fm.fileExists(atPath: sourceHTMLURL.path)
 
-        if hasMarkdown, !hasHTML || sourceIsNewer(sourceMDURL, than: sourceHTMLURL) {
+        let cachedHTML = hasHTML ? try? String(contentsOf: sourceHTMLURL, encoding: .utf8) : nil
+        if hasMarkdown, cachedHTML == nil
+            || sourceIsNewer(sourceMDURL, than: sourceHTMLURL)
+            || !builtWithCurrentShell(cachedHTML ?? "") {
             renderFromSource(bundleURL: bundleURL, sourceMDURL: sourceMDURL, completion: completion)
             return
         }
 
-        guard hasHTML, let html = try? String(contentsOf: sourceHTMLURL, encoding: .utf8) else {
+        guard let html = cachedHTML else {
             completion(.failure(LoadError.missingContent))
             return
         }
@@ -115,6 +118,29 @@ enum MarpBundleLoader {
         shell = shell.replacingOccurrences(of: "<!--IMARP_STYLE-->", with: css)
         shell = shell.replacingOccurrences(of: "<!--IMARP_SLIDES-->", with: html)
         return shell
+    }
+
+    /// The `marp-cli@x.y.z` stamp in a page's bespoke.js license comment,
+    /// identifying which presentation shell it was assembled from.
+    private static func shellVersion(in html: String) -> Substring? {
+        guard let range = html.range(of: "marp-cli@") else { return nil }
+        return html[range.upperBound...].prefix(while: { $0.isNumber || $0 == "." })
+    }
+
+    private static let currentShellVersion: Substring? = {
+        guard let url = Bundle.main.url(forResource: "shell", withExtension: "html", subdirectory: "MarpEngine"),
+              let shell = try? String(contentsOf: url, encoding: .utf8)
+        else { return nil }
+        return shellVersion(in: shell)
+    }()
+
+    /// Whether a cached `source.html` came from the shell this build ships.
+    /// When the shell is upgraded (e.g. marp-cli 4.5.1 added the slide
+    /// overview), decks rendered with the old one are re-rendered so they
+    /// pick up the new presentation features without the source changing.
+    private static func builtWithCurrentShell(_ html: String) -> Bool {
+        guard let current = currentShellVersion else { return true }
+        return shellVersion(in: html) == current
     }
 
     /// Marp stamps every slide's `<section>` with the same
