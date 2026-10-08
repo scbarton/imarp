@@ -132,6 +132,31 @@ final class MainViewController: UIViewController {
         slideCanvas.canvasView.addGestureRecognizer(swipeLeft)
         slideCanvas.canvasView.addGestureRecognizer(swipeRight)
 
+        // A finger tap on the slide's own HTML (a link, a video, a button)
+        // acts on it; the ink layer sits on top of the page, so the tap is
+        // hit-tested in the page and handled here. Finger-only: the Pencil
+        // keeps drawing everywhere, links and videos included. Doesn't cancel
+        // the canvas's own touches, so finger drawing (if allowed) and the
+        // swipes are unaffected.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleSlideTap(_:)))
+        tap.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        tap.cancelsTouchesInView = false
+        // Alongside PencilKit's own drawing gesture, which otherwise claims
+        // a finger touch first whenever finger drawing is allowed.
+        tap.delegate = self
+        slideCanvas.canvasView.addGestureRecognizer(tap)
+
+        // A finger double tap on a slide video makes it fill the slide (and
+        // the external screen); again to restore. The single tap waits for
+        // this to fail, so a double tap doesn't also play/pause.
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleSlideDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        doubleTap.cancelsTouchesInView = false
+        doubleTap.delegate = self
+        slideCanvas.canvasView.addGestureRecognizer(doubleTap)
+        tap.require(toFail: doubleTap)
+
         // The laser pointer follows the Pencil. In pointer mode, touching
         // down with the Pencil moves the dot instead of drawing (PencilKit's
         // drawing gesture is switched off; see updatePointerMode), and
@@ -351,6 +376,54 @@ final class MainViewController: UIViewController {
         }
     }
 
+    @objc private func handleSlideDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended, !slideCanvas.isOverviewOpen else { return }
+        let point = slideCanvas.pagePoint(for: recognizer)
+        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: 22) { [weak self] hit in
+            guard let self, let hit, hit.kind == .media else { return }
+            slideCanvas.contentView.setMediaFilled(index: hit.index, on: nil) { filled in
+                NotificationCenter.default.post(name: .mediaFillChanged, object: nil, userInfo: [
+                    "index": hit.index, "filled": filled,
+                ])
+            }
+        }
+    }
+
+    @objc private func handleSlideTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended, !slideCanvas.isOverviewOpen else { return }
+        let point = slideCanvas.pagePoint(for: recognizer)
+        // About a fingertip's radius, so a tap just beside small link text
+        // still counts.
+        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: 22) { [weak self] hit in
+            #if DEBUG
+            print("[imarp tap] at \(point) hit \(String(describing: hit))")
+            #endif
+            guard let self, let hit else { return }
+            switch hit.kind {
+            case .link:
+                if hit.isInDeckLink {
+                    // A link to another slide: let the deck follow it; the
+                    // position reports bring the store and external display.
+                    slideCanvas.contentView.activateControl(index: hit.index)
+                } else if let url = hit.href {
+                    UIApplication.shared.open(url)
+                }
+            case .media:
+                // Sound comes from the external display when there is one, so
+                // the iPad's copy plays muted alongside it.
+                let muted = PresentationStore.shared.externalDisplayActive
+                slideCanvas.contentView.setMedia(index: hit.index, playing: nil, time: nil, muted: muted) { playing, time in
+                    NotificationCenter.default.post(name: .mediaCommand, object: nil, userInfo: [
+                        "index": hit.index, "playing": playing, "time": time,
+                    ])
+                }
+            case .control:
+                slideCanvas.contentView.activateControl(index: hit.index)
+                NotificationCenter.default.post(name: .htmlControlActivated, object: nil, userInfo: ["index": hit.index])
+            }
+        }
+    }
+
     @objc private func hideAnnotationsTapped() {
         let store = PresentationStore.shared
         let hidden = !store.annotationsHidden
@@ -388,6 +461,12 @@ final class MainViewController: UIViewController {
         guard !slideCanvas.isOverviewOpen else { return }
         // The new position arrives through contentView.onPositionChanged.
         slideCanvas.step(forward: forward)
+    }
+}
+
+extension MainViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
     }
 }
 

@@ -42,6 +42,18 @@ extension Notification.Name {
     /// rescaled, so the dot lands over the same part of the slide on both
     /// screens regardless of how differently each canvas is letterboxed.
     static let pointerDidMove = Notification.Name("pointerDidMove")
+    /// Posted (userInfo["index"], ["playing"], ["time"]) after a finger tap
+    /// played or paused one of the current slide's videos on the iPad; the
+    /// external display does the same to its copy. `index` counts the active
+    /// slide's interactive elements, the same on both screens.
+    static let mediaCommand = Notification.Name("mediaCommand")
+    /// Posted (userInfo["index"], ["filled"]) after a finger double tap made
+    /// one of the current slide's videos fill the slide, or restored it.
+    static let mediaFillChanged = Notification.Name("mediaFillChanged")
+    /// Posted (userInfo["index"]) after a finger tap activated one of the
+    /// current slide's other HTML controls (a button, a <details> summary...)
+    /// on the iPad, so the external display can do the same.
+    static let htmlControlActivated = Notification.Name("htmlControlActivated")
     /// Posted (userInfo["enabled"]: Bool) when the toolbar pointer toggle is
     /// flipped. Both scenes observe this so a display connecting
     /// mid-presentation starts in the right state, and so the main scene's
@@ -103,6 +115,10 @@ final class PresentationStore {
     /// at all (see `MainViewController.handleHover(_:)`) — set via the
     /// toolbar's "Pointer" toggle button.
     private(set) var pointerEnabled = false
+
+    /// Whether the external display scene is showing slides. While it is,
+    /// slide video sound comes from it, and the iPad's copy plays muted.
+    var externalDisplayActive = false
 
     private init() {
         // Bundled sample deck, shown until the user opens an .marpbundle.

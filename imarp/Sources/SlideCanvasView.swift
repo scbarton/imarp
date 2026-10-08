@@ -70,6 +70,12 @@ final class SlideContentView: UIView {
                     Object.defineProperty = originalDefine;
                     window.__imarpDeck = target;
                     target.on('fragment', function (event) {
+                        // Leaving a slide stops its videos/audio, so sound
+                        // never carries on from a slide that's gone.
+                        if (window.__imarpPosition && window.__imarpPosition.index !== event.index) {
+                            document.querySelectorAll('video, audio').forEach(function (media) { media.pause(); });
+                            document.querySelectorAll('[data-imarp-filled]').forEach(function (media) { window.__imarpFill(media, false); });
+                        }
                         window.__imarpPosition = { index: event.index, fragment: event.fragmentIndex };
                         window.webkit.messageHandlers.imarpPosition.postMessage([event.index, event.fragmentIndex]);
                     });
@@ -173,6 +179,80 @@ final class SlideContentView: UIView {
                 var width = viewBox.width * scale, height = viewBox.height * scale;
                 return [window.innerWidth, window.innerHeight, box.left + (box.width - width) / 2, box.top + (box.height - height) / 2, width, height];
             };
+            // Finger taps on the slide's own HTML (links, videos, buttons).
+            // The ink layer covers the page, so the app hit-tests here and
+            // then acts on the element; elements are identified by their
+            // position among the active slide's interactive elements, which
+            // is the same on both screens.
+            var interactiveSelector = 'a[href], video, audio, button, summary, input, select, label, [onclick]';
+            function activeInteractive() {
+                var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
+                return active ? Array.prototype.slice.call(active.querySelectorAll(interactiveSelector)) : [];
+            }
+            // A fingertip is much bigger than a line of link text, so when
+            // nothing is directly under the tap, take the nearest interactive
+            // element within `slop` (page px).
+            window.__imarpHit = function (x, y, slop) {
+                var candidates = activeInteractive();
+                var element = document.elementFromPoint(x, y);
+                var target = element && element.closest ? element.closest(interactiveSelector) : null;
+                var index = target ? candidates.indexOf(target) : -1;
+                if (index < 0 && slop > 0) {
+                    var best = slop;
+                    candidates.forEach(function (candidate, i) {
+                        Array.prototype.forEach.call(candidate.getClientRects(), function (rect) {
+                            var dx = Math.max(rect.left - x, 0, x - rect.right);
+                            var dy = Math.max(rect.top - y, 0, y - rect.bottom);
+                            var distance = Math.sqrt(dx * dx + dy * dy);
+                            if (distance <= best) { best = distance; index = i; }
+                        });
+                    });
+                    target = index >= 0 ? candidates[index] : null;
+                }
+                if (index < 0) { return null; }
+                var tag = target.tagName.toLowerCase();
+                if (tag === 'a') { return { kind: 'link', index: index, href: target.href, hash: target.getAttribute('href').charAt(0) === '#' }; }
+                if (tag === 'video' || tag === 'audio') { return { kind: 'media', index: index }; }
+                return { kind: 'control', index: index };
+            };
+            window.__imarpActivate = function (index) {
+                var element = activeInteractive()[index];
+                if (element) { element.click(); }
+                return !!element;
+            };
+            // playing: true/false to set, or null to toggle. Returns the
+            // resulting [playing, currentTime], so the other screen can match.
+            window.__imarpMedia = function (index, playing, time, muted) {
+                var media = activeInteractive()[index];
+                if (!media || typeof media.play !== 'function') { return null; }
+                media.muted = muted;
+                if (playing === null) { playing = media.paused; }
+                if (typeof time === 'number' && Math.abs(media.currentTime - time) > 0.3) { media.currentTime = time; }
+                if (playing) { media.play().catch(function () {}); } else { media.pause(); }
+                return [playing, media.currentTime];
+            };
+            // "Full screen" for a slide video: it fills the whole slide (which
+            // on the external display is the whole screen), on both screens,
+            // with the ink layer still on top. The native full-screen player
+            // would cover only the iPad.
+            window.__imarpFill = function (media, on) {
+                if (on && !media.hasAttribute('data-imarp-filled')) {
+                    media.setAttribute('data-imarp-filled', media.getAttribute('style') || '');
+                    media.style.cssText = 'position:absolute; left:0; top:0; width:100%; height:100%; ' +
+                        'object-fit:contain; background:#000; z-index:1000; margin:0;';
+                } else if (!on && media.hasAttribute('data-imarp-filled')) {
+                    media.setAttribute('style', media.getAttribute('data-imarp-filled'));
+                    media.removeAttribute('data-imarp-filled');
+                }
+            };
+            // on: true/false to set, or null to toggle. Returns the result.
+            window.__imarpMediaFill = function (index, on) {
+                var media = activeInteractive()[index];
+                if (!media || typeof media.play !== 'function') { return null; }
+                if (on === null) { on = !media.hasAttribute('data-imarp-filled'); }
+                window.__imarpFill(media, on);
+                return on;
+            };
             window.__imarpGo = function (index, fragment) {
                 var deck = window.__imarpDeck;
                 if (!deck) { return null; }
@@ -229,6 +309,10 @@ final class SlideContentView: UIView {
 
     override init(frame: CGRect) {
         let configuration = WKWebViewConfiguration()
+        // Slide videos play in place, and the external display can start one
+        // without a touch of its own (it mirrors taps made on the iPad).
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         // Marp's bespoke output ships its own on-screen page controls and a
         // fullscreen toggle. Navigation here is driven entirely by our own
         // toolbar (and, on the external display, by nothing at all), so
@@ -412,6 +496,58 @@ final class SlideContentView: UIView {
 
     /// Opens or closes Marp's slide overview. Only decks rendered with a
     /// marp-cli 4.5+ shell have one; on anything older this does nothing.
+    /// The slide's interactive HTML element under `point` (in page
+    /// coordinates, the same as the ink canvas's), if any.
+    struct HitElement {
+        enum Kind: String { case link, media, control }
+        let kind: Kind
+        let index: Int
+        let href: URL?
+        let isInDeckLink: Bool
+    }
+
+    /// `tolerance` (page points): how far from the tap an element can be and
+    /// still count, for taps that land just beside small link text.
+    func hitTest(pagePoint point: CGPoint, tolerance: CGFloat, completion: @escaping (HitElement?) -> Void) {
+        guard didFinishInitialLoad else { completion(nil); return }
+        webView.evaluateJavaScript("window.__imarpHit(\(point.x), \(point.y), \(tolerance))") { result, _ in
+            guard let info = result as? [String: Any],
+                  let kind = (info["kind"] as? String).flatMap(HitElement.Kind.init(rawValue:)),
+                  let index = info["index"] as? Int
+            else { completion(nil); return }
+            completion(HitElement(
+                kind: kind, index: index,
+                href: (info["href"] as? String).flatMap(URL.init(string:)),
+                isInDeckLink: (info["hash"] as? Bool) ?? false
+            ))
+        }
+    }
+
+    func activateControl(index: Int) {
+        webView.evaluateJavaScript("window.__imarpActivate(\(index))")
+    }
+
+    /// `playing` nil toggles. Reports the resulting state and time.
+    func setMedia(index: Int, playing: Bool?, time: Double?, muted: Bool, completion: ((Bool, Double) -> Void)? = nil) {
+        let playingJS = playing.map { $0 ? "true" : "false" } ?? "null"
+        let timeJS = time.map { String($0) } ?? "null"
+        webView.evaluateJavaScript("window.__imarpMedia(\(index), \(playingJS), \(timeJS), \(muted))") { result, _ in
+            guard let values = result as? [Any], values.count == 2,
+                  let playing = values[0] as? Bool, let time = values[1] as? Double
+            else { return }
+            completion?(playing, time)
+        }
+    }
+
+    /// Makes a slide video fill the slide (`on` nil toggles); reports the
+    /// resulting state.
+    func setMediaFilled(index: Int, on: Bool?, completion: ((Bool) -> Void)? = nil) {
+        let onJS = on.map { $0 ? "true" : "false" } ?? "null"
+        webView.evaluateJavaScript("window.__imarpMediaFill(\(index), \(onJS))") { result, _ in
+            if let filled = result as? Bool { completion?(filled) }
+        }
+    }
+
     func setOverviewOpen(_ open: Bool) {
         guard didFinishInitialLoad else { return }
         webView.evaluateJavaScript("window.__imarpToggleOverview(\(open))") { [weak self] result, _ in
@@ -786,6 +922,12 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             x: rect.minX + normalizedPoint.x * rect.width,
             y: rect.minY + normalizedPoint.y * rect.height
         ))
+    }
+
+    /// Where `recognizer` is, in the page/canvas coordinates that ink
+    /// strokes and the page's own layout use.
+    func pagePoint(for recognizer: UIGestureRecognizer) -> CGPoint {
+        recognizer.location(in: canvasView)
     }
 
     override func layoutSubviews() {

@@ -48,6 +48,25 @@ final class ExternalDisplayViewController: UIViewController {
         NotificationCenter.default.addObserver(forName: .slideIndexDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.followStore()
         }
+        // Mirror what the presenter does with the slide's own HTML on the
+        // iPad. This screen carries the sound for slide videos.
+        NotificationCenter.default.addObserver(forName: .mediaCommand, object: nil, queue: .main) { [weak self] note in
+            guard let index = note.userInfo?["index"] as? Int,
+                  let playing = note.userInfo?["playing"] as? Bool
+            else { return }
+            let time = note.userInfo?["time"] as? Double
+            self?.slideCanvas.contentView.setMedia(index: index, playing: playing, time: time, muted: false)
+        }
+        NotificationCenter.default.addObserver(forName: .mediaFillChanged, object: nil, queue: .main) { [weak self] note in
+            guard let index = note.userInfo?["index"] as? Int,
+                  let filled = note.userInfo?["filled"] as? Bool
+            else { return }
+            self?.slideCanvas.contentView.setMediaFilled(index: index, on: filled)
+        }
+        NotificationCenter.default.addObserver(forName: .htmlControlActivated, object: nil, queue: .main) { [weak self] note in
+            guard let index = note.userInfo?["index"] as? Int else { return }
+            self?.slideCanvas.contentView.activateControl(index: index)
+        }
         NotificationCenter.default.addObserver(forName: .deckDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.reloadDeckFromStore()
         }
@@ -71,6 +90,21 @@ final class ExternalDisplayViewController: UIViewController {
 
         slideCanvas.annotationsHidden = PresentationStore.shared.annotationsHidden
         reloadDeckFromStore()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        PresentationStore.shared.externalDisplayActive = true
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        PresentationStore.shared.externalDisplayActive = false
+    }
+
+    deinit {
+        let store = PresentationStore.shared
+        DispatchQueue.main.async { store.externalDisplayActive = false }
     }
 
     override func viewDidLayoutSubviews() {
