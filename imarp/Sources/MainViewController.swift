@@ -254,6 +254,7 @@ final class MainViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         toolPicker.addObserver(slideCanvas.canvasView)
+        toolPicker.addObserver(self)
         toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
         slideCanvas.canvasView.becomeFirstResponder()
         updatePresentButtonTitle()
@@ -408,6 +409,27 @@ final class MainViewController: UIViewController {
         guard !slideCanvas.isOverviewOpen else { return }
         // The new position arrives through contentView.onPositionChanged.
         slideCanvas.step(forward: forward)
+    }
+}
+
+extension MainViewController: PKToolPickerObserver {
+    /// A finger on the slide (playing a video, tapping a link) makes the
+    /// web page first responder, which hides the tool picker. Whenever it
+    /// disappears during plain presenting, hand first responder straight
+    /// back to the canvas so the tools come back. Not while the overview, a
+    /// sheet (file picker, the full-screen video player...) is up, or the
+    /// app is going inactive: those hide the picker on purpose.
+    func toolPickerVisibilityDidChange(_ toolPicker: PKToolPicker) {
+        guard !toolPicker.isVisible else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  !toolPicker.isVisible,
+                  view.window != nil,
+                  presentedViewController == nil,
+                  UIApplication.shared.applicationState == .active
+            else { return }
+            restoreToolPicker()
+        }
     }
 }
 
