@@ -179,62 +179,77 @@ final class SlideContentView: UIView {
                 var width = viewBox.width * scale, height = viewBox.height * scale;
                 return [window.innerWidth, window.innerHeight, box.left + (box.width - width) / 2, box.top + (box.height - height) / 2, width, height];
             };
-            // Finger taps on the slide's own HTML (links, videos, buttons).
-            // The ink layer covers the page, so the app hit-tests here and
-            // then acts on the element; elements are identified by their
-            // position among the active slide's interactive elements, which
-            // is the same on both screens.
+            // The presenter's fingers use the slide's own HTML directly (the
+            // ink layer passes them through). What they do is reported to the
+            // app so the external display can do the same; elements are
+            // identified by their position among the active slide's
+            // interactive elements, which is the same on both screens.
             var interactiveSelector = 'a[href], video, audio, button, summary, input, select, label, [onclick]';
             function activeInteractive() {
                 var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
                 return active ? Array.prototype.slice.call(active.querySelectorAll(interactiveSelector)) : [];
             }
-            // A fingertip is much bigger than a line of link text, so when
-            // nothing is directly under the tap, take the nearest interactive
-            // element within `slop` (page px).
-            window.__imarpHit = function (x, y, slop) {
-                var candidates = activeInteractive();
-                var element = document.elementFromPoint(x, y);
-                var target = element && element.closest ? element.closest(interactiveSelector) : null;
-                var index = target ? candidates.indexOf(target) : -1;
-                if (index < 0 && slop > 0) {
-                    var best = slop;
-                    candidates.forEach(function (candidate, i) {
-                        Array.prototype.forEach.call(candidate.getClientRects(), function (rect) {
-                            var dx = Math.max(rect.left - x, 0, x - rect.right);
-                            var dy = Math.max(rect.top - y, 0, y - rect.bottom);
-                            var distance = Math.sqrt(dx * dx + dy * dy);
-                            if (distance <= best) { best = distance; index = i; }
-                        });
-                    });
-                    target = index >= 0 ? candidates[index] : null;
-                }
-                if (index < 0) { return null; }
+            function post(name, body) {
+                var handler = window.webkit && window.webkit.messageHandlers[name];
+                if (handler) { handler.postMessage(body); }
+            }
+            // Videos and audio: native controls, mirrored. Media events don't
+            // bubble, so listen in the capture phase. Sound comes from the
+            // external display when there is one (__imarpMuted, set by the
+            // app), so the iPad's copy plays muted.
+            window.__imarpMuted = false;
+            function reportMedia(event) {
+                var media = event.target;
+                if (!media || typeof media.play !== 'function') { return; }
+                if (event.type === 'play') { media.muted = window.__imarpMuted; }
+                var index = activeInteractive().indexOf(media);
+                if (index < 0) { return; }
+                var body = { index: index, playing: !media.paused, time: media.currentTime, rate: media.playbackRate };
+                if (event.type === 'webkitbeginfullscreen') { body.fullscreen = true; }
+                if (event.type === 'webkitendfullscreen') { body.fullscreen = false; }
+                post('imarpMedia', body);
+            }
+            ['play', 'pause', 'seeked', 'ratechange', 'webkitbeginfullscreen', 'webkitendfullscreen'].forEach(function (type) {
+                document.addEventListener(type, reportMedia, true);
+            });
+            // Other controls (buttons, <details>...): report real taps (not
+            // the app's own mirrored clicks). Links aren't mirrored: in-deck
+            // links move the deck, which the external display follows anyway.
+            document.addEventListener('click', function (event) {
+                if (!event.isTrusted || !event.target || !event.target.closest) { return; }
+                var target = event.target.closest(interactiveSelector);
+                if (!target) { return; }
                 var tag = target.tagName.toLowerCase();
-                if (tag === 'a') { return { kind: 'link', index: index, href: target.href, hash: target.getAttribute('href').charAt(0) === '#' }; }
-                if (tag === 'video' || tag === 'audio') { return { kind: 'media', index: index }; }
-                return { kind: 'control', index: index };
-            };
+                if (tag === 'a' || tag === 'video' || tag === 'audio') { return; }
+                var index = activeInteractive().indexOf(target);
+                if (index >= 0) { post('imarpControl', index); }
+            }, true);
+            // While the page is pinch-zoomed, a one-finger drag should pan,
+            // not swipe to another slide: keep touches from Marp's own swipe
+            // handling (WebKit's panning doesn't depend on them).
+            ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
+                window.addEventListener(type, function (event) {
+                    if (window.visualViewport && window.visualViewport.scale > 1.01) { event.stopPropagation(); }
+                }, { capture: true, passive: true });
+            });
             window.__imarpActivate = function (index) {
                 var element = activeInteractive()[index];
                 if (element) { element.click(); }
                 return !!element;
             };
-            // playing: true/false to set, or null to toggle. Returns the
-            // resulting [playing, currentTime], so the other screen can match.
-            window.__imarpMedia = function (index, playing, time, muted) {
+            // Applies what the other screen's media did.
+            window.__imarpMedia = function (index, playing, time, rate, muted) {
                 var media = activeInteractive()[index];
                 if (!media || typeof media.play !== 'function') { return null; }
                 media.muted = muted;
-                if (playing === null) { playing = media.paused; }
+                if (typeof rate === 'number' && rate > 0) { media.playbackRate = rate; }
                 if (typeof time === 'number' && Math.abs(media.currentTime - time) > 0.3) { media.currentTime = time; }
                 if (playing) { media.play().catch(function () {}); } else { media.pause(); }
-                return [playing, media.currentTime];
+                return true;
             };
-            // "Full screen" for a slide video: it fills the whole slide (which
-            // on the external display is the whole screen), on both screens,
-            // with the ink layer still on top. The native full-screen player
-            // would cover only the iPad.
+            // A slide video filling the whole slide (on the external display,
+            // the whole screen): what the external display shows while the
+            // presenter has the video in iOS's full-screen player on the iPad.
             window.__imarpFill = function (media, on) {
                 if (on && !media.hasAttribute('data-imarp-filled')) {
                     media.setAttribute('data-imarp-filled', media.getAttribute('style') || '');
@@ -338,13 +353,29 @@ final class SlideContentView: UIView {
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
         configuration.userContentController.add(messageProxy, name: "imarpTransition")
         configuration.userContentController.add(messageProxy, name: "imarpOverview")
+        configuration.userContentController.add(messageProxy, name: "imarpMedia")
+        configuration.userContentController.add(messageProxy, name: "imarpControl")
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: frame)
         messageProxy.target = self
+        // The presenter pinch-zooms the page itself; report it so the ink
+        // canvas (and the external display) can follow.
+        let reportZoom: (UIScrollView) -> Void = { [weak self] scrollView in
+            self?.onPageZoomChanged?(scrollView.zoomScale, scrollView.contentOffset)
+        }
+        zoomObservations = [
+            webView.scrollView.observe(\.contentOffset) { scrollView, _ in reportZoom(scrollView) },
+            webView.scrollView.observe(\.zoomScale) { scrollView, _ in reportZoom(scrollView) },
+        ]
 
         backgroundColor = .black
-        webView.scrollView.isScrollEnabled = false
+        // Scrolling only ever happens while pinch-zoomed in (at normal size
+        // the page is exactly the view's size), and then it's the pan.
+        webView.scrollView.isScrollEnabled = true
         webView.scrollView.bounces = false
+        webView.scrollView.bouncesZoom = false
+        // Long-pressing a link shouldn't pop up a preview mid-talk.
+        webView.allowsLinkPreview = false
         // Otherwise the page is inset by the window's safe area (overscan on
         // some external displays), shifting the slide away from where
         // `SlideCanvasView.slideRect(in:aspectRatio:)` says it is and so
@@ -496,47 +527,55 @@ final class SlideContentView: UIView {
 
     /// Opens or closes Marp's slide overview. Only decks rendered with a
     /// marp-cli 4.5+ shell have one; on anything older this does nothing.
-    /// The slide's interactive HTML element under `point` (in page
-    /// coordinates, i.e. the unzoomed canvas's), if any.
-    struct HitElement {
-        enum Kind: String { case link, media, control }
-        let kind: Kind
-        let index: Int
-        let href: URL?
-        let isInDeckLink: Bool
+    /// The presenter played, paused, seeked, changed speed or toggled full
+    /// screen on one of the current slide's videos (native controls), as
+    /// reported by the page: index among the slide's interactive elements,
+    /// playing, time, rate, and the new full-screen state if that changed.
+    var onMediaEvent: ((Int, Bool, Double, Double, Bool?) -> Void)?
+
+    /// The presenter tapped one of the current slide's other HTML controls.
+    var onControlActivated: ((Int) -> Void)?
+
+    /// The page's own (pinch) zoom and scroll position changed.
+    var onPageZoomChanged: ((CGFloat, CGPoint) -> Void)?
+    private var zoomObservations: [NSKeyValueObservation] = []
+
+    /// Whether this screen's slide videos play muted (the iPad's, while the
+    /// external display carries the sound).
+    var mutesMedia = false {
+        didSet { applyMediaMuting() }
     }
 
-    /// `tolerance` (page points): how far from the tap an element can be and
-    /// still count, for taps that land just beside small link text.
-    func hitTest(pagePoint point: CGPoint, tolerance: CGFloat, completion: @escaping (HitElement?) -> Void) {
-        guard didFinishInitialLoad else { completion(nil); return }
-        webView.evaluateJavaScript("window.__imarpHit(\(point.x), \(point.y), \(tolerance))") { result, _ in
-            guard let info = result as? [String: Any],
-                  let kind = (info["kind"] as? String).flatMap(HitElement.Kind.init(rawValue:)),
-                  let index = info["index"] as? Int
-            else { completion(nil); return }
-            completion(HitElement(
-                kind: kind, index: index,
-                href: (info["href"] as? String).flatMap(URL.init(string:)),
-                isInDeckLink: (info["hash"] as? Bool) ?? false
-            ))
-        }
+    private func applyMediaMuting() {
+        guard didFinishInitialLoad else { return }
+        webView.evaluateJavaScript("""
+            window.__imarpMuted = \(mutesMedia);
+            document.querySelectorAll('video, audio').forEach(function (m) { m.muted = \(mutesMedia); });
+            """)
     }
 
     func activateControl(index: Int) {
         webView.evaluateJavaScript("window.__imarpActivate(\(index))")
     }
 
-    /// `playing` nil toggles. Reports the resulting state and time.
-    func setMedia(index: Int, playing: Bool?, time: Double?, muted: Bool, completion: ((Bool, Double) -> Void)? = nil) {
-        let playingJS = playing.map { $0 ? "true" : "false" } ?? "null"
+    /// Matches one of the current slide's videos to the other screen's.
+    func setMedia(index: Int, playing: Bool, time: Double?, rate: Double?, muted: Bool) {
         let timeJS = time.map { String($0) } ?? "null"
-        webView.evaluateJavaScript("window.__imarpMedia(\(index), \(playingJS), \(timeJS), \(muted))") { result, _ in
-            guard let values = result as? [Any], values.count == 2,
-                  let playing = values[0] as? Bool, let time = values[1] as? Double
-            else { return }
-            completion?(playing, time)
-        }
+        let rateJS = rate.map { String($0) } ?? "null"
+        webView.evaluateJavaScript("window.__imarpMedia(\(index), \(playing), \(timeJS), \(rateJS), \(muted))")
+    }
+
+    fileprivate func mediaReported(_ info: [String: Any]) {
+        guard let index = info["index"] as? Int, let playing = info["playing"] as? Bool else { return }
+        let time = (info["time"] as? Double) ?? 0
+        let rate = (info["rate"] as? Double) ?? 1
+        log("media \(index) playing=\(playing) time=\(time) rate=\(rate) fullscreen=\(String(describing: info["fullscreen"]))")
+        onMediaEvent?(index, playing, time, rate, info["fullscreen"] as? Bool)
+    }
+
+    fileprivate func controlReported(_ index: Int) {
+        log("control \(index) tapped")
+        onControlActivated?(index)
     }
 
     /// Makes a slide video fill the slide (`on` nil toggles); reports the
@@ -639,6 +678,14 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: SlideContentView?
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "imarpMedia" {
+            if let info = message.body as? [String: Any] { target?.mediaReported(info) }
+            return
+        }
+        if message.name == "imarpControl" {
+            if let index = message.body as? Int { target?.controlReported(index) }
+            return
+        }
         if message.name == "imarpOverview" {
             guard let open = message.body as? Bool else { return }
             target?.overviewReported(open: open)
@@ -655,6 +702,31 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 }
 
 extension SlideContentView: WKNavigationDelegate {
+    /// Tapped links: within the deck (`#3`) they move it as usual; anything
+    /// else opens in its own app (Safari...) rather than replacing the deck.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard navigationAction.navigationType == .linkActivated,
+              navigationAction.targetFrame?.isMainFrame ?? true,
+              let url = navigationAction.request.url
+        else {
+            decisionHandler(.allow)
+            return
+        }
+        var target = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var current = webView.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        target?.fragment = nil
+        current?.fragment = nil
+        target?.query = nil
+        current?.query = nil
+        if let target, let current, target == current {
+            decisionHandler(.allow)
+            return
+        }
+        log("opening link \(url) outside the deck")
+        UIApplication.shared.open(url)
+        decisionHandler(.cancel)
+    }
+
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard let url = loadedURL, let directory = loadedDirectory else { return }
         let position = lastKnownPosition
@@ -666,6 +738,7 @@ extension SlideContentView: WKNavigationDelegate {
         log("didFinish")
         didFinishInitialLoad = true
         updateViewport()
+        applyMediaMuting()
         if let targetPosition {
             show(targetPosition)
         }
@@ -747,9 +820,13 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     }
 
     /// While Marp's slide overview is up, the ink layer gets out of the way:
-    /// it belongs to one slide, not to the grid, and taps have to reach the
-    /// overview underneath rather than draw.
+    /// it belongs to one slide, not to the grid.
     private var overviewShowing = false {
+        didSet { updateInkLayer() }
+    }
+
+    /// Set while the Pencil drives the laser pointer instead of drawing.
+    var isDrawingSuspended = false {
         didSet { updateInkLayer() }
     }
 
@@ -758,7 +835,8 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
 
     private func updateInkLayer() {
         canvasView.isHidden = annotationsHidden || overviewShowing
-        canvasView.isUserInteractionEnabled = isDrawingEnabled && !overviewShowing
+        canvasView.drawingGestureRecognizer.isEnabled =
+            isDrawingEnabled && !annotationsHidden && !overviewShowing && !isDrawingSuspended
     }
 
     func setOverviewOpen(_ open: Bool) {
@@ -780,23 +858,30 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         // the same ink then lands a few points off on the other screen.
         // Pin content coordinates to the view's own.
         canvasView.contentInsetAdjustmentBehavior = .never
-        // Pinch to zoom into the slide. The canvas zooms natively (strokes
-        // stay sharp, and keep being stored in unzoomed content coordinates,
-        // so saved ink, the external display's rescaling and PDF export are
-        // all unaffected); the webview underneath is zoomed to match in
-        // scrollViewDidZoom/DidScroll. Panning is only on while zoomed in, so
-        // at normal size the finger swipes still change slides.
+        // Zoom: the presenter pinches the page itself (WebKit zooms it
+        // natively and sharp), and the canvas is zoomed to match in
+        // followPageZoom. Strokes stay sharp and keep being stored in
+        // unzoomed content coordinates, so saved ink, the external display's
+        // rescaling and PDF export are all unaffected.
         canvasView.minimumZoomScale = 1
         canvasView.maximumZoomScale = Self.maximumZoom
-        // No rubber-banding past the limits: the webview can't follow it, so
-        // the ink would briefly run past the slide while fingers are down.
         canvasView.bounces = false
         canvasView.bouncesZoom = false
         canvasView.isScrollEnabled = false
-        // .anyInput would always allow finger drawing regardless of the
-        // user's system-wide "Only Draw with Apple Pencil" setting; .default
-        // respects that setting like other PencilKit apps do.
+        // Touch model: fingers belong to the slide's own HTML (links, video
+        // controls, Marp's swipes, pinch-zoom), the Pencil to the ink. iOS
+        // doesn't say finger or Pencil when it picks which view gets a touch,
+        // so the ink layer takes no touches itself; PencilKit's drawing
+        // gesture is moved up to this view instead, where (as a gesture on
+        // an ancestor) it still sees every touch over the slide, takes the
+        // ones that draw, and cancels them for the page. Which ones draw
+        // follows the tool picker's "Draw with Finger" setting (.default):
+        // with it off, only the Pencil draws and fingers pass to the page
+        // untouched. (PencilKit's lasso and ruler need touches on the canvas
+        // itself, so they don't work here; pens and the eraser do.)
         canvasView.drawingPolicy = .default
+        canvasView.isUserInteractionEnabled = false
+        addGestureRecognizer(canvasView.drawingGestureRecognizer)
         canvasView.delegate = self
         contentView.onTransitionActiveChanged = { [weak self] active in
             self?.setInkSuppressedForTransition(active)
@@ -805,6 +890,10 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             guard let self else { return }
             overviewShowing = open
             onOverviewChanged?(open)
+        }
+        // Pinch-zoom happens natively in the page; the ink follows it.
+        contentView.onPageZoomChanged = { [weak self] scale, offset in
+            self?.followPageZoom(scale: scale, offset: offset)
         }
 
         addSubview(contentView)
@@ -1009,10 +1098,18 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.contentOffset = CGPoint(x: origin.x * zoom, y: origin.y * zoom)
     }
 
+    private func followPageZoom(scale: CGFloat, offset: CGPoint) {
+        if abs(canvasView.zoomScale - scale) > 0.0001 {
+            canvasView.setZoomScale(scale, animated: false)
+        }
+        if abs(canvasView.contentOffset.x - offset.x) > 0.5 || abs(canvasView.contentOffset.y - offset.y) > 0.5 {
+            canvasView.contentOffset = offset
+        }
+    }
+
     private func zoomDidChange() {
         let zoom = canvasView.zoomScale
         let offset = canvasView.contentOffset
-        canvasView.isScrollEnabled = isZoomed
         contentView.setZoom(scale: zoom, offset: offset)
         guard isZoomed else {
             onVisibleRegionChanged?(nil)

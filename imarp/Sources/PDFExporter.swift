@@ -102,7 +102,7 @@ enum PDFExporter {
         // through these; nothing here needs them, but posting to a handler
         // that isn't registered would throw inside the page.
         let sink = IgnoredScriptMessages()
-        for name in ["imarpPosition", "imarpTransition", "imarpOverview"] {
+        for name in ["imarpPosition", "imarpTransition", "imarpOverview", "imarpMedia", "imarpControl"] {
             configuration.userContentController.add(sink, name: name)
         }
         let webView = WKWebView(frame: hostFrame, configuration: configuration)
@@ -118,7 +118,7 @@ enum PDFExporter {
 
         func finish(_ url: URL?) {
             webView.removeFromSuperview()
-            for name in ["imarpPosition", "imarpTransition", "imarpOverview"] {
+            for name in ["imarpPosition", "imarpTransition", "imarpOverview", "imarpMedia", "imarpControl"] {
                 configuration.userContentController.removeScriptMessageHandler(forName: name)
             }
             completion(url)

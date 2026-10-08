@@ -42,21 +42,25 @@ extension Notification.Name {
     /// rescaled, so the dot lands over the same part of the slide on both
     /// screens regardless of how differently each canvas is letterboxed.
     static let pointerDidMove = Notification.Name("pointerDidMove")
-    /// Posted (userInfo["index"], ["playing"], ["time"]) after a finger tap
-    /// played or paused one of the current slide's videos on the iPad; the
-    /// external display does the same to its copy. `index` counts the active
+    /// Posted (userInfo["index"], ["playing"], ["time"], ["rate"]) when the
+    /// presenter played, paused, seeked or changed the speed of one of the
+    /// current slide's videos on the iPad; the external display does the
+    /// same to its copy. `index` counts the active
     /// slide's interactive elements, the same on both screens.
     static let mediaCommand = Notification.Name("mediaCommand")
-    /// Posted (userInfo["index"], ["filled"]) after a finger double tap made
-    /// one of the current slide's videos fill the slide, or restored it.
+    /// Posted (userInfo["index"], ["filled"]) when one of the current slide's
+    /// videos entered or left iOS's full-screen player on the iPad; the
+    /// external display fills its screen with the video meanwhile.
     static let mediaFillChanged = Notification.Name("mediaFillChanged")
-    /// Posted (userInfo["index"]) after a finger tap activated one of the
+    /// Posted (userInfo["index"]) after the presenter tapped one of the
     /// current slide's other HTML controls (a button, a <details> summary...)
     /// on the iPad, so the external display can do the same.
     static let htmlControlActivated = Notification.Name("htmlControlActivated")
     /// Posted (userInfo["region"]: NSValue CGRect, normalized to the slide;
     /// absent when back to the whole slide) as the iPad zooms and pans.
     static let slideZoomDidChange = Notification.Name("slideZoomDidChange")
+    /// Posted when the external display scene starts or stops showing slides.
+    static let externalDisplayActiveDidChange = Notification.Name("externalDisplayActiveDidChange")
     /// Posted (userInfo["enabled"]: Bool) when the toolbar pointer toggle is
     /// flipped. Both scenes observe this so a display connecting
     /// mid-presentation starts in the right state, and so the main scene's
@@ -121,7 +125,12 @@ final class PresentationStore {
 
     /// Whether the external display scene is showing slides. While it is,
     /// slide video sound comes from it, and the iPad's copy plays muted.
-    var externalDisplayActive = false
+    var externalDisplayActive = false {
+        didSet {
+            guard externalDisplayActive != oldValue else { return }
+            NotificationCenter.default.post(name: .externalDisplayActiveDidChange, object: nil)
+        }
+    }
 
     /// The part of the slide the iPad is zoomed into (normalized), so an
     /// external display that connects mid-zoom starts at the same view.

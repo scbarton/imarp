@@ -58,7 +58,8 @@ final class ExternalDisplayViewController: UIViewController {
                   let playing = note.userInfo?["playing"] as? Bool
             else { return }
             let time = note.userInfo?["time"] as? Double
-            self?.slideCanvas.contentView.setMedia(index: index, playing: playing, time: time, muted: false)
+            let rate = note.userInfo?["rate"] as? Double
+            self?.slideCanvas.contentView.setMedia(index: index, playing: playing, time: time, rate: rate, muted: false)
         }
         NotificationCenter.default.addObserver(forName: .mediaFillChanged, object: nil, queue: .main) { [weak self] note in
             guard let index = note.userInfo?["index"] as? Int,
