@@ -19,6 +19,10 @@ final class MainViewController: UIViewController {
     /// when a different deck is opened.
     private var accessedBundleURL: URL?
 
+    private lazy var pencilPointer = UILongPressGestureRecognizer(
+        target: self, action: #selector(handlePointerGesture(_:))
+    )
+
     /// Typed as `AnyObject` because a stored property can't have an
     /// iOS 27-only type while the deployment target is 17.0; the computed
     /// property below restores the real type behind an availability check.
@@ -128,12 +132,23 @@ final class MainViewController: UIViewController {
         slideCanvas.canvasView.addGestureRecognizer(swipeLeft)
         slideCanvas.canvasView.addGestureRecognizer(swipeRight)
 
-        // Apple Pencil hover (proximity, no touch-down) drives the laser
-        // pointer. It never fires during an actual touch-down stroke, so
-        // there's no conflict with PencilKit's own drawing or with the
-        // finger-only swipe recognizers above.
-        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+        // The laser pointer follows the Pencil. In pointer mode, touching
+        // down with the Pencil moves the dot instead of drawing (PencilKit's
+        // drawing gesture is switched off; see updatePointerMode), and
+        // lifting it hides the dot. Pencil-only, so finger swipes still change
+        // slides. Recognizes immediately (no minimum press) so the dot appears
+        // the moment the tip lands.
+        pencilPointer.minimumPressDuration = 0
+        pencilPointer.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
+        slideCanvas.canvasView.addGestureRecognizer(pencilPointer)
+
+        // On iPads that support Apple Pencil hover (M2 iPad Pro and later),
+        // holding the tip just above the screen moves the dot too. Hover
+        // never fires during a touch-down stroke, so it can't conflict with
+        // drawing or the swipes.
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handlePointerGesture(_:)))
         slideCanvas.addGestureRecognizer(hover)
+        updatePointerMode()
 
         NotificationCenter.default.addObserver(forName: .stepRequested, object: nil, queue: .main) { [weak self] note in
             self?.handleStepRequested(note)
@@ -144,6 +159,7 @@ final class MainViewController: UIViewController {
         NotificationCenter.default.addObserver(forName: .pointerEnabledDidChange, object: nil, queue: .main) { [weak self] note in
             guard let enabled = note.userInfo?["enabled"] as? Bool else { return }
             self?.pointerToggleButton?.title = enabled ? "Pointer On" : "Pointer"
+            self?.updatePointerMode()
         }
         NotificationCenter.default.addObserver(forName: .pointerDidMove, object: nil, queue: .main) { [weak self] note in
             guard let self else { return }
@@ -302,7 +318,14 @@ final class MainViewController: UIViewController {
         store.setPointerEnabled(!store.pointerEnabled)
     }
 
-    @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
+    /// In pointer mode the Pencil drives the laser dot rather than drawing.
+    private func updatePointerMode() {
+        let enabled = PresentationStore.shared.pointerEnabled
+        pencilPointer.isEnabled = enabled
+        slideCanvas.canvasView.drawingGestureRecognizer.isEnabled = !enabled
+    }
+
+    @objc private func handlePointerGesture(_ recognizer: UIGestureRecognizer) {
         let store = PresentationStore.shared
         guard store.pointerEnabled else { return }
         switch recognizer.state {
