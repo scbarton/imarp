@@ -107,6 +107,9 @@ final class MainViewController: UIViewController {
 
         slideCanvas.translatesAutoresizingMaskIntoConstraints = false
         toolbar.translatesAutoresizingMaskIntoConstraints = false
+        // Black button titles (white in dark mode) rather than the default
+        // blue tint.
+        toolbar.tintColor = .label
         view.addSubview(toolbar)
         view.addSubview(slideCanvas)
 
@@ -294,7 +297,23 @@ final class MainViewController: UIViewController {
     }
 
     @objc private func clearTapped() {
-        applyDrawing(PKDrawing(), forSlideIndex: PresentationStore.shared.currentIndex, actionName: "Clear")
+        let store = PresentationStore.shared
+        let index = store.currentIndex
+        #if DEBUG
+        print("[imarp clear] slide \(index), strokes before: \(slideCanvas.canvasView.drawing.strokes.count)")
+        #endif
+        applyDrawing(PKDrawing(), forSlideIndex: index, actionName: "Clear")
+        // Right after a stroke, PencilKit keeps showing it even though the
+        // drawing is now empty (the canvas's last stroke lingers on screen
+        // until something makes it redraw). Assigning the empty drawing again
+        // once things settle does; still one Undo step.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, store.currentIndex == index, store.drawing(for: index).strokes.isEmpty else { return }
+            #if DEBUG
+            print("[imarp clear] slide \(index), strokes after: \(slideCanvas.canvasView.drawing.strokes.count), refreshing")
+            #endif
+            slideCanvas.setDrawing(PKDrawing())
+        }
     }
 
     /// Registers this drawing change on the canvas's undo manager — the
@@ -351,6 +370,9 @@ final class MainViewController: UIViewController {
         let enabled = PresentationStore.shared.pointerEnabled
         pencilPointer.isEnabled = enabled
         slideCanvas.isDrawingSuspended = enabled
+        #if DEBUG
+        print("[imarp pointer] mode \(enabled ? "on" : "off")")
+        #endif
     }
 
     @objc private func handlePointerGesture(_ recognizer: UIGestureRecognizer) {

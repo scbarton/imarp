@@ -782,7 +782,7 @@ final class PointerDotView: UIView {
 
     private lazy var dotLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
-        layer.fillColor = UIColor.systemRed.cgColor
+        layer.fillColor = UIColor.systemGreen.cgColor
         layer.bounds = CGRect(x: 0, y: 0, width: dotDiameter, height: dotDiameter)
         layer.path = UIBezierPath(ovalIn: layer.bounds).cgPath
         return layer
@@ -792,8 +792,8 @@ final class PointerDotView: UIView {
         let layer = CAGradientLayer()
         layer.type = .radial
         layer.colors = [
-            UIColor.systemRed.withAlphaComponent(0.55).cgColor,
-            UIColor.systemRed.withAlphaComponent(0.0).cgColor,
+            UIColor.systemGreen.withAlphaComponent(0.55).cgColor,
+            UIColor.systemGreen.withAlphaComponent(0.0).cgColor,
         ]
         layer.locations = [0, 1]
         layer.bounds = CGRect(x: 0, y: 0, width: glowDiameter, height: glowDiameter)
