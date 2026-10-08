@@ -54,6 +54,9 @@ extension Notification.Name {
     /// current slide's other HTML controls (a button, a <details> summary...)
     /// on the iPad, so the external display can do the same.
     static let htmlControlActivated = Notification.Name("htmlControlActivated")
+    /// Posted (userInfo["region"]: NSValue CGRect, normalized to the slide;
+    /// absent when back to the whole slide) as the iPad zooms and pans.
+    static let slideZoomDidChange = Notification.Name("slideZoomDidChange")
     /// Posted (userInfo["enabled"]: Bool) when the toolbar pointer toggle is
     /// flipped. Both scenes observe this so a display connecting
     /// mid-presentation starts in the right state, and so the main scene's
@@ -119,6 +122,17 @@ final class PresentationStore {
     /// Whether the external display scene is showing slides. While it is,
     /// slide video sound comes from it, and the iPad's copy plays muted.
     var externalDisplayActive = false
+
+    /// The part of the slide the iPad is zoomed into (normalized), so an
+    /// external display that connects mid-zoom starts at the same view.
+    private(set) var zoomRegion: CGRect?
+
+    func setZoomRegion(_ region: CGRect?) {
+        zoomRegion = region
+        var userInfo: [String: Any] = [:]
+        if let region { userInfo["region"] = NSValue(cgRect: region) }
+        NotificationCenter.default.post(name: .slideZoomDidChange, object: nil, userInfo: userInfo)
+    }
 
     private init() {
         // Bundled sample deck, shown until the user opens an .marpbundle.

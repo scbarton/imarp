@@ -19,6 +19,8 @@ final class MainViewController: UIViewController {
     /// when a different deck is opened.
     private var accessedBundleURL: URL?
 
+    private var slideSwipes: [UISwipeGestureRecognizer] = []
+
     private lazy var pencilPointer = UILongPressGestureRecognizer(
         target: self, action: #selector(handlePointerGesture(_:))
     )
@@ -131,6 +133,7 @@ final class MainViewController: UIViewController {
         swipeRight.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
         slideCanvas.canvasView.addGestureRecognizer(swipeLeft)
         slideCanvas.canvasView.addGestureRecognizer(swipeRight)
+        slideSwipes = [swipeLeft, swipeRight]
 
         // A finger tap on the slide's own HTML (a link, a video, a button)
         // acts on it; the ink layer sits on top of the page, so the tap is
@@ -156,6 +159,20 @@ final class MainViewController: UIViewController {
         doubleTap.delegate = self
         slideCanvas.canvasView.addGestureRecognizer(doubleTap)
         tap.require(toFail: doubleTap)
+
+        // Pinch zooms into the slide (see SlideCanvasView); a two-finger
+        // double tap goes back to the whole slide.
+        let resetZoom = UITapGestureRecognizer(target: self, action: #selector(resetZoomTapped))
+        resetZoom.numberOfTouchesRequired = 2
+        resetZoom.numberOfTapsRequired = 2
+        resetZoom.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        slideCanvas.canvasView.addGestureRecognizer(resetZoom)
+        slideCanvas.onVisibleRegionChanged = { [weak self] region in
+            guard let self else { return }
+            // While zoomed in, one finger pans rather than changing slides.
+            slideSwipes.forEach { $0.isEnabled = region == nil }
+            PresentationStore.shared.setZoomRegion(region)
+        }
 
         // The laser pointer follows the Pencil. In pointer mode, touching
         // down with the Pencil moves the dot instead of drawing (PencilKit's
@@ -199,6 +216,8 @@ final class MainViewController: UIViewController {
         slideCanvas.contentView.onPositionChanged = { [weak self] position in
             guard let self else { return }
             let store = PresentationStore.shared
+            // A zoom belongs to the slide it was made on.
+            if position.index != store.currentIndex { slideCanvas.resetZoom(animated: true) }
             store.setCurrentPosition(position)
             slideCanvas.setDrawing(store.drawing(for: position.index))
             NotificationCenter.default.post(name: .slideIndexDidChange, object: nil)
@@ -218,7 +237,11 @@ final class MainViewController: UIViewController {
         // while it's open, which hides the PencilKit tool picker; hand it back
         // to the canvas once the overview closes.
         slideCanvas.onOverviewChanged = { [weak self] open in
-            if !open { self?.restoreToolPicker() }
+            if open {
+                self?.slideCanvas.resetZoom(animated: false)
+            } else {
+                self?.restoreToolPicker()
+            }
         }
 
         registerExternalDisplayAccessory()
@@ -355,13 +378,9 @@ final class MainViewController: UIViewController {
         guard store.pointerEnabled else { return }
         switch recognizer.state {
         case .began, .changed:
-            let location = recognizer.location(in: slideCanvas)
-            let rect = SlideCanvasView.slideRect(in: slideCanvas.bounds.size, aspectRatio: store.slideAspectRatio)
-            guard rect.width > 0, rect.height > 0 else { return }
-            let normalized = CGPoint(
-                x: (location.x - rect.minX) / rect.width,
-                y: (location.y - rect.minY) / rect.height
-            )
+            // Accounts for zoom, so the dot lands on the same part of the
+            // slide on both screens.
+            guard let normalized = slideCanvas.normalizedSlidePoint(for: recognizer) else { return }
             // Only show the pointer while actually over the slide itself,
             // not the letterbox bars around it.
             guard (0...1).contains(normalized.x), (0...1).contains(normalized.y) else {
@@ -376,10 +395,15 @@ final class MainViewController: UIViewController {
         }
     }
 
+    @objc private func resetZoomTapped() {
+        slideCanvas.resetZoom(animated: true)
+    }
+
     @objc private func handleSlideDoubleTap(_ recognizer: UITapGestureRecognizer) {
         guard recognizer.state == .ended, !slideCanvas.isOverviewOpen else { return }
         let point = slideCanvas.pagePoint(for: recognizer)
-        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: 22) { [weak self] hit in
+        let tolerance = 22 / slideCanvas.canvasView.zoomScale
+        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: tolerance) { [weak self] hit in
             guard let self, let hit, hit.kind == .media else { return }
             slideCanvas.contentView.setMediaFilled(index: hit.index, on: nil) { filled in
                 NotificationCenter.default.post(name: .mediaFillChanged, object: nil, userInfo: [
@@ -392,9 +416,10 @@ final class MainViewController: UIViewController {
     @objc private func handleSlideTap(_ recognizer: UITapGestureRecognizer) {
         guard recognizer.state == .ended, !slideCanvas.isOverviewOpen else { return }
         let point = slideCanvas.pagePoint(for: recognizer)
-        // About a fingertip's radius, so a tap just beside small link text
-        // still counts.
-        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: 22) { [weak self] hit in
+        // About a fingertip's radius on screen, so less of the slide as the
+        // presenter zooms in.
+        let tolerance = 22 / slideCanvas.canvasView.zoomScale
+        slideCanvas.contentView.hitTest(pagePoint: point, tolerance: tolerance) { [weak self] hit in
             #if DEBUG
             print("[imarp tap] at \(point) hit \(String(describing: hit))")
             #endif

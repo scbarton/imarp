@@ -31,6 +31,9 @@ final class ExternalDisplayViewController: UIViewController {
             // anywhere else on its own, put it back.
             let wanted = PresentationStore.shared.currentPosition
             if position != wanted { slideCanvas.show(wanted) }
+            // Match the iPad's zoom (e.g. after this display connects or
+            // reloads mid-zoom).
+            slideCanvas.showSlideRegion(PresentationStore.shared.zoomRegion)
         }
         slideCanvas.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(slideCanvas)
@@ -66,6 +69,10 @@ final class ExternalDisplayViewController: UIViewController {
         NotificationCenter.default.addObserver(forName: .htmlControlActivated, object: nil, queue: .main) { [weak self] note in
             guard let index = note.userInfo?["index"] as? Int else { return }
             self?.slideCanvas.contentView.activateControl(index: index)
+        }
+        NotificationCenter.default.addObserver(forName: .slideZoomDidChange, object: nil, queue: .main) { [weak self] note in
+            let region = (note.userInfo?["region"] as? NSValue)?.cgRectValue
+            self?.slideCanvas.showSlideRegion(region)
         }
         NotificationCenter.default.addObserver(forName: .deckDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.reloadDeckFromStore()

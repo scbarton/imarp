@@ -168,7 +168,7 @@ final class SlideContentView: UIView {
                     meta.setAttribute('name', 'viewport');
                     document.head.appendChild(meta);
                 }
-                meta.setAttribute('content', 'width=' + width + ', height=' + height + ', initial-scale=1, maximum-scale=1, user-scalable=no');
+                meta.setAttribute('content', 'width=' + width + ', height=' + height + ', initial-scale=1, minimum-scale=1, maximum-scale=5, user-scalable=yes');
             };
             window.__imarpGeometry = function () {
                 var svg = document.querySelector('svg[data-marpit-svg]');
@@ -497,7 +497,7 @@ final class SlideContentView: UIView {
     /// Opens or closes Marp's slide overview. Only decks rendered with a
     /// marp-cli 4.5+ shell have one; on anything older this does nothing.
     /// The slide's interactive HTML element under `point` (in page
-    /// coordinates, the same as the ink canvas's), if any.
+    /// coordinates, i.e. the unzoomed canvas's), if any.
     struct HitElement {
         enum Kind: String { case link, media, control }
         let kind: Kind
@@ -545,6 +545,18 @@ final class SlideContentView: UIView {
         let onJS = on.map { $0 ? "true" : "false" } ?? "null"
         webView.evaluateJavaScript("window.__imarpMediaFill(\(index), \(onJS))") { result, _ in
             if let filled = result as? Bool { completion?(filled) }
+        }
+    }
+
+    /// Zooms the page natively (WebKit re-renders it sharp at the new scale)
+    /// to match the ink canvas above it.
+    func setZoom(scale: CGFloat, offset: CGPoint) {
+        let scrollView = webView.scrollView
+        if abs(scrollView.zoomScale - scale) > 0.0001 {
+            scrollView.setZoomScale(scale, animated: false)
+        }
+        if scrollView.contentOffset != offset {
+            scrollView.contentOffset = offset
         }
     }
 
@@ -768,6 +780,18 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         // the same ink then lands a few points off on the other screen.
         // Pin content coordinates to the view's own.
         canvasView.contentInsetAdjustmentBehavior = .never
+        // Pinch to zoom into the slide. The canvas zooms natively (strokes
+        // stay sharp, and keep being stored in unzoomed content coordinates,
+        // so saved ink, the external display's rescaling and PDF export are
+        // all unaffected); the webview underneath is zoomed to match in
+        // scrollViewDidZoom/DidScroll. Panning is only on while zoomed in, so
+        // at normal size the finger swipes still change slides.
+        canvasView.minimumZoomScale = 1
+        canvasView.maximumZoomScale = Self.maximumZoom
+        // No rubber-banding past the limits: the webview can't follow it, so
+        // the ink would briefly run past the slide while fingers are down.
+        canvasView.bounces = false
+        canvasView.bouncesZoom = false
         canvasView.isScrollEnabled = false
         // .anyInput would always allow finger drawing regardless of the
         // user's system-wide "Only Draw with Apple Pencil" setting; .default
@@ -918,21 +942,110 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             pointerDotView.hide()
             return
         }
-        pointerDotView.show(at: CGPoint(
+        // Slide content coordinates, then onto the screen through the zoom.
+        let content = CGPoint(
             x: rect.minX + normalizedPoint.x * rect.width,
             y: rect.minY + normalizedPoint.y * rect.height
+        )
+        let zoom = canvasView.zoomScale
+        let offset = canvasView.contentOffset
+        pointerDotView.show(at: CGPoint(x: content.x * zoom - offset.x, y: content.y * zoom - offset.y))
+    }
+
+    // MARK: Zoom
+
+    static let maximumZoom: CGFloat = 5
+
+    var isZoomed: Bool { canvasView.zoomScale > 1.001 }
+
+    /// Called with the part of the slide currently visible, normalized to the
+    /// slide (0...1 in each direction), or nil when not zoomed in.
+    var onVisibleRegionChanged: ((CGRect?) -> Void)?
+
+    /// Where `recognizer` is, in the unzoomed page/canvas coordinates that
+    /// ink strokes and the page's own layout use.
+    func pagePoint(for recognizer: UIGestureRecognizer) -> CGPoint {
+        let location = recognizer.location(in: canvasView)
+        let zoom = canvasView.zoomScale
+        return CGPoint(x: location.x / zoom, y: location.y / zoom)
+    }
+
+    /// `pagePoint(for:)` normalized to the slide (0...1 when over it).
+    func normalizedSlidePoint(for recognizer: UIGestureRecognizer) -> CGPoint? {
+        let rect = Self.slideRect(in: bounds.size, aspectRatio: PresentationStore.shared.slideAspectRatio)
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        let point = pagePoint(for: recognizer)
+        return CGPoint(x: (point.x - rect.minX) / rect.width, y: (point.y - rect.minY) / rect.height)
+    }
+
+    func resetZoom(animated: Bool) {
+        guard isZoomed else { return }
+        canvasView.setZoomScale(1, animated: animated)
+    }
+
+    /// Zooms so that `region` (normalized to the slide, as reported by the
+    /// other screen's onVisibleRegionChanged) fills this canvas as nearly as
+    /// its shape allows, centered on it. nil returns to the whole slide.
+    func showSlideRegion(_ region: CGRect?) {
+        guard let region else {
+            resetZoom(animated: false)
+            return
+        }
+        let slide = Self.slideRect(in: bounds.size, aspectRatio: PresentationStore.shared.slideAspectRatio)
+        guard slide.width > 0, region.width > 0, region.height > 0 else { return }
+        let target = CGRect(
+            x: slide.minX + region.minX * slide.width,
+            y: slide.minY + region.minY * slide.height,
+            width: region.width * slide.width,
+            height: region.height * slide.height
+        )
+        let zoom = min(max(min(bounds.width / target.width, bounds.height / target.height), 1), Self.maximumZoom)
+        let visible = CGSize(width: bounds.width / zoom, height: bounds.height / zoom)
+        let origin = CGPoint(
+            x: min(max(target.midX - visible.width / 2, 0), bounds.width - visible.width),
+            y: min(max(target.midY - visible.height / 2, 0), bounds.height - visible.height)
+        )
+        canvasView.setZoomScale(zoom, animated: false)
+        canvasView.contentOffset = CGPoint(x: origin.x * zoom, y: origin.y * zoom)
+    }
+
+    private func zoomDidChange() {
+        let zoom = canvasView.zoomScale
+        let offset = canvasView.contentOffset
+        canvasView.isScrollEnabled = isZoomed
+        contentView.setZoom(scale: zoom, offset: offset)
+        guard isZoomed else {
+            onVisibleRegionChanged?(nil)
+            return
+        }
+        let slide = Self.slideRect(in: bounds.size, aspectRatio: PresentationStore.shared.slideAspectRatio)
+        guard slide.width > 0, slide.height > 0 else { return }
+        let visible = CGRect(x: offset.x / zoom, y: offset.y / zoom, width: bounds.width / zoom, height: bounds.height / zoom)
+        onVisibleRegionChanged?(CGRect(
+            x: (visible.minX - slide.minX) / slide.width,
+            y: (visible.minY - slide.minY) / slide.height,
+            width: visible.width / slide.width,
+            height: visible.height / slide.height
         ))
     }
 
-    /// Where `recognizer` is, in the page/canvas coordinates that ink
-    /// strokes and the page's own layout use.
-    func pagePoint(for recognizer: UIGestureRecognizer) -> CGPoint {
-        recognizer.location(in: canvasView)
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        zoomDidChange()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        zoomDidChange()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if canvasView.contentOffset != .zero { canvasView.contentOffset = .zero }
+        // At normal size the canvas's content is exactly its bounds (no
+        // scrolling, strokes in the view's own coordinates); zooming needs a
+        // content size to scale from.
+        if !isZoomed {
+            if canvasView.contentSize != bounds.size { canvasView.contentSize = bounds.size }
+            if canvasView.contentOffset != .zero { canvasView.contentOffset = .zero }
+        }
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
