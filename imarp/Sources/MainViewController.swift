@@ -87,7 +87,8 @@ final class MainViewController: UIViewController {
         presentButton = presentItem
 
         let pointerItem = UIBarButtonItem(
-            title: "Pointer", style: .plain, target: self, action: #selector(pointerToggleTapped)
+            title: Self.pointerTitle(enabled: PresentationStore.shared.pointerEnabled),
+            style: .plain, target: self, action: #selector(pointerToggleTapped)
         )
         pointerToggleButton = pointerItem
 
@@ -182,7 +183,7 @@ final class MainViewController: UIViewController {
         }
         NotificationCenter.default.addObserver(forName: .pointerEnabledDidChange, object: nil, queue: .main) { [weak self] note in
             guard let enabled = note.userInfo?["enabled"] as? Bool else { return }
-            self?.pointerToggleButton?.title = enabled ? "Pointer On" : "Pointer"
+            self?.pointerToggleButton?.title = Self.pointerTitle(enabled: enabled)
             self?.updatePointerMode()
         }
         NotificationCenter.default.addObserver(forName: .pointerDidMove, object: nil, queue: .main) { [weak self] note in
@@ -363,6 +364,13 @@ final class MainViewController: UIViewController {
     @objc private func pointerToggleTapped() {
         let store = PresentationStore.shared
         store.setPointerEnabled(!store.pointerEnabled)
+    }
+
+    /// The dot shows the pointer's state: black when off, green (the laser
+    /// dot's own color) when on. Emoji keep their own colors, so the
+    /// toolbar's tint doesn't recolor them.
+    private static func pointerTitle(enabled: Bool) -> String {
+        enabled ? "Pointer \u{1F7E2}" : "Pointer \u{26AB}\u{FE0F}"
     }
 
     /// In pointer mode the Pencil drives the laser dot rather than drawing.
