@@ -224,6 +224,22 @@ final class SlideContentView: UIView {
                 var index = activeInteractive().indexOf(target);
                 if (index >= 0) { post('imarpControl', index); }
             }, true);
+            // The Pencil belongs to the ink (drawing, or the laser pointer),
+            // never to the page: keep its touches from Marp's swipe (a Pencil
+            // stroke must not change slides) and from turning into taps on
+            // links or controls. WebKit marks them touchType 'stylus'.
+            ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
+                window.addEventListener(type, function (event) {
+                    var touches = event.changedTouches || [];
+                    for (var i = 0; i < touches.length; i++) {
+                        if (touches[i].touchType === 'stylus') {
+                            event.stopPropagation();
+                            if (event.cancelable) { event.preventDefault(); }
+                            return;
+                        }
+                    }
+                }, { capture: true, passive: false });
+            });
             // While the page is pinch-zoomed, a one-finger drag should pan,
             // not swipe to another slide: keep touches from Marp's own swipe
             // handling (WebKit's panning doesn't depend on them).

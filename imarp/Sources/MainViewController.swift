@@ -158,6 +158,9 @@ final class MainViewController: UIViewController {
         // PencilKit's own drawing gesture, since the canvas takes no touches.
         pencilPointer.minimumPressDuration = 0
         pencilPointer.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
+        // Alongside the page's own touch handling underneath, which would
+        // otherwise claim the touch first.
+        pencilPointer.delegate = self
         slideCanvas.addGestureRecognizer(pencilPointer)
 
         // On iPads that support Apple Pencil hover (M2 iPad Pro and later),
@@ -409,6 +412,12 @@ final class MainViewController: UIViewController {
         guard !slideCanvas.isOverviewOpen else { return }
         // The new position arrives through contentView.onPositionChanged.
         slideCanvas.step(forward: forward)
+    }
+}
+
+extension MainViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === pencilPointer
     }
 }
 
