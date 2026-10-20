@@ -221,6 +221,9 @@ final class SlideContentView: UIView {
                 if (!target) { return; }
                 var tag = target.tagName.toLowerCase();
                 if (tag === 'a' || tag === 'video' || tag === 'audio') { return; }
+                // Form controls are mirrored by value instead (see
+                // formInputScript); a mirrored click would toggle them twice.
+                if (tag === 'input' || tag === 'select' || tag === 'label') { return; }
                 var index = activeInteractive().indexOf(target);
                 if (index >= 0) { post('imarpControl', index); }
             }, true);
@@ -338,6 +341,110 @@ final class SlideContentView: UIView {
         })();
         """
 
+    /// Runs in every frame, including iframes on slides (e.g. interactive
+    /// widgets with sliders), which the deck hook can't see into. Each change
+    /// the presenter makes to a form control (a slider, checkbox, menu, text
+    /// field) is relayed up to the slideshow page, each frame adding its own
+    /// position among its parent's iframes, and from there to the app, so the
+    /// external display can set the same control on its copy of the page.
+    /// Clicks on buttons inside iframes are relayed the same way. Mirrored
+    /// changes are untrusted events, so they're never relayed back.
+    private static let formInputScript = """
+        (function () {
+            var isTop = window === window.top;
+            // A slide's iframes, in document order. In the slideshow page that
+            // leaves out the overview's iframe, which only exists once opened.
+            function frames() {
+                var selector = isTop ? 'svg[data-marpit-svg] iframe' : 'iframe';
+                return Array.prototype.slice.call(document.querySelectorAll(selector));
+            }
+            // An element's id, or its child-index path from the document (in
+            // the slideshow page, from its slide, led by the slide's index, so
+            // nothing the app or bespoke adds elsewhere can shift it).
+            function slides() { return Array.prototype.slice.call(document.querySelectorAll('svg[data-marpit-svg]')); }
+            function elementPath(element) {
+                if (element.id) { return element.id; }
+                var root = isTop ? element.closest('svg[data-marpit-svg]') : document.documentElement;
+                if (!root) { return null; }
+                var path = [];
+                while (element && element !== root) {
+                    path.unshift(Array.prototype.indexOf.call(element.parentNode.children, element));
+                    element = element.parentNode;
+                }
+                if (isTop) { path.unshift(slides().indexOf(root)); }
+                return path;
+            }
+            function findElement(path) {
+                if (typeof path === 'string') { return document.getElementById(path); }
+                var element = isTop ? slides()[path[0]] : document.documentElement;
+                for (var i = isTop ? 1 : 0; i < path.length && element; i++) { element = element.children[path[i]]; }
+                return element;
+            }
+            function relay(change) {
+                if (isTop) {
+                    var handler = window.webkit && window.webkit.messageHandlers.imarpInput;
+                    if (handler) { handler.postMessage(change); }
+                } else {
+                    window.parent.postMessage({ imarpInputRelay: change }, '*');
+                }
+            }
+            function report(event) {
+                if (!event.isTrusted) { return; }
+                var element = event.target;
+                var change;
+                if (event.type === 'click') {
+                    // The slideshow page mirrors its own clicks (see deckHookScript).
+                    if (isTop || !element || !element.closest) { return; }
+                    element = element.closest('button, summary, [onclick]');
+                    if (!element) { return; }
+                    change = { kind: 'click', frames: [], path: elementPath(element) };
+                } else {
+                    if (!element || !('value' in element) || !/^(INPUT|SELECT|TEXTAREA)$/.test(element.tagName)) { return; }
+                    change = { kind: event.type, frames: [], path: elementPath(element),
+                               value: String(element.value), checked: !!element.checked };
+                }
+                if (change.path !== null) { relay(change); }
+            }
+            ['input', 'change', 'click'].forEach(function (type) {
+                document.addEventListener(type, report, true);
+            });
+            function apply(change) {
+                if (change.frames.length > 0) {
+                    var frame = frames()[change.frames[0]];
+                    if (frame && frame.contentWindow) {
+                        frame.contentWindow.postMessage({ imarpInputApply: {
+                            kind: change.kind, frames: change.frames.slice(1), path: change.path,
+                            value: change.value, checked: change.checked } }, '*');
+                    }
+                    return;
+                }
+                var element = findElement(change.path);
+                if (!element) { return; }
+                if (change.kind === 'click') { element.click(); return; }
+                if (element.type === 'checkbox' || element.type === 'radio') {
+                    element.checked = change.checked;
+                } else {
+                    element.value = change.value;
+                }
+                element.dispatchEvent(new Event(change.kind, { bubbles: true }));
+            }
+            window.addEventListener('message', function (event) {
+                var data = event.data;
+                if (!data || typeof data !== 'object') { return; }
+                if (data.imarpInputRelay) {
+                    var index = frames().findIndex(function (frame) { return frame.contentWindow === event.source; });
+                    if (index < 0) { return; }
+                    var change = data.imarpInputRelay;
+                    change.frames.unshift(index);
+                    relay(change);
+                } else if (data.imarpInputApply && !isTop) {
+                    apply(data.imarpInputApply);
+                }
+            });
+            if (isTop) { window.__imarpApplyInput = apply; }
+        })();
+        """
+
     override init(frame: CGRect) {
         let configuration = WKWebViewConfiguration()
         // Slide videos play in place, and the external display can start one
@@ -363,9 +470,13 @@ final class SlideContentView: UIView {
             WKUserScript(source: Self.overviewFrameScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         )
         configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.formInputScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+        configuration.userContentController.addUserScript(
             WKUserScript(source: hideChromeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         let messageProxy = WeakScriptMessageHandler()
+        configuration.userContentController.add(messageProxy, name: "imarpInput")
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
         configuration.userContentController.add(messageProxy, name: "imarpTransition")
         configuration.userContentController.add(messageProxy, name: "imarpOverview")
@@ -589,6 +700,22 @@ final class SlideContentView: UIView {
         onMediaEvent?(index, playing, time, rate, info["fullscreen"] as? Bool)
     }
 
+    /// The presenter changed a form control (or clicked a button in a slide's
+    /// iframe); the payload is opaque, for `applyFormInput(_:)` on the other
+    /// screen.
+    var onFormInput: (([String: Any]) -> Void)?
+
+    func applyFormInput(_ change: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: change),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+        webView.evaluateJavaScript("window.__imarpApplyInput && window.__imarpApplyInput(\(json))")
+    }
+
+    fileprivate func formInputReported(_ change: [String: Any]) {
+        onFormInput?(change)
+    }
+
     fileprivate func controlReported(_ index: Int) {
         log("control \(index) tapped")
         onControlActivated?(index)
@@ -696,6 +823,10 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "imarpMedia" {
             if let info = message.body as? [String: Any] { target?.mediaReported(info) }
+            return
+        }
+        if message.name == "imarpInput" {
+            if let change = message.body as? [String: Any] { target?.formInputReported(change) }
             return
         }
         if message.name == "imarpControl" {

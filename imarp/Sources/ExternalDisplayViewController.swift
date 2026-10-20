@@ -34,6 +34,11 @@ final class ExternalDisplayViewController: UIViewController {
             // Match the iPad's zoom (e.g. after this display connects or
             // reloads mid-zoom).
             slideCanvas.showSlideRegion(PresentationStore.shared.zoomRegion)
+            // And the presenter's widget settings (e.g. after connecting
+            // mid-talk). Setting a control to its current value is harmless.
+            for change in PresentationStore.shared.formInputs.values {
+                slideCanvas.contentView.applyFormInput(change)
+            }
         }
         slideCanvas.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(slideCanvas)
@@ -70,6 +75,10 @@ final class ExternalDisplayViewController: UIViewController {
         NotificationCenter.default.addObserver(forName: .htmlControlActivated, object: nil, queue: .main) { [weak self] note in
             guard let index = note.userInfo?["index"] as? Int else { return }
             self?.slideCanvas.contentView.activateControl(index: index)
+        }
+        NotificationCenter.default.addObserver(forName: .formInputChanged, object: nil, queue: .main) { [weak self] note in
+            guard let change = note.userInfo?["change"] as? [String: Any] else { return }
+            self?.slideCanvas.contentView.applyFormInput(change)
         }
         NotificationCenter.default.addObserver(forName: .slideZoomDidChange, object: nil, queue: .main) { [weak self] note in
             let region = (note.userInfo?["region"] as? NSValue)?.cgRectValue

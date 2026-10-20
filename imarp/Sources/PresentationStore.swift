@@ -56,6 +56,10 @@ extension Notification.Name {
     /// current slide's other HTML controls (a button, a <details> summary...)
     /// on the iPad, so the external display can do the same.
     static let htmlControlActivated = Notification.Name("htmlControlActivated")
+    /// Posted (userInfo["change"]) after the presenter changed a form control
+    /// on a slide (e.g. a widget's slider, inside an iframe) or clicked a
+    /// button inside a slide's iframe, so the external display can do the same.
+    static let formInputChanged = Notification.Name("formInputChanged")
     /// Posted (userInfo["region"]: NSValue CGRect, normalized to the slide;
     /// absent when back to the whole slide) as the iPad zooms and pans.
     static let slideZoomDidChange = Notification.Name("slideZoomDidChange")
@@ -132,6 +136,18 @@ final class PresentationStore {
         }
     }
 
+    /// The latest value of every form control the presenter has changed in
+    /// this deck, so an external display that connects (or reloads) later
+    /// shows the same widget state. Keyed by the control's frames and path.
+    private(set) var formInputs: [String: [String: Any]] = [:]
+
+    func recordFormInput(_ change: [String: Any]) {
+        guard (change["kind"] as? String) != "click",
+              let frames = change["frames"], let path = change["path"]
+        else { return }
+        formInputs["\(frames)|\(path)"] = change
+    }
+
     /// The part of the slide the iPad is zoomed into (normalized), so an
     /// external display that connects mid-zoom starts at the same view.
     private(set) var zoomRegion: CGRect?
@@ -174,6 +190,7 @@ final class PresentationStore {
         self.bundleURL = bundleURL
         currentPosition = .start
         drawings = [:]
+        formInputs = [:]
         loadInkFromDisk()
         NotificationCenter.default.post(name: .deckDidChange, object: nil)
     }

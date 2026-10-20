@@ -147,6 +147,10 @@ final class MainViewController: UIViewController {
         slideCanvas.contentView.onControlActivated = { index in
             NotificationCenter.default.post(name: .htmlControlActivated, object: nil, userInfo: ["index": index])
         }
+        slideCanvas.contentView.onFormInput = { change in
+            PresentationStore.shared.recordFormInput(change)
+            NotificationCenter.default.post(name: .formInputChanged, object: nil, userInfo: ["change": change])
+        }
         // Sound comes from the external display when there is one.
         slideCanvas.contentView.mutesMedia = PresentationStore.shared.externalDisplayActive
         NotificationCenter.default.addObserver(forName: .externalDisplayActiveDidChange, object: nil, queue: .main) { [weak self] _ in
