@@ -609,6 +609,26 @@ final class SlideContentView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         updateViewport()
+        keepPencilOffPage()
+    }
+
+    /// The Pencil belongs to the ink, never to the page. PencilKit's drawing
+    /// gesture only claims a stroke once it starts drawing, so a Pencil tap
+    /// or drag could otherwise also work a link, a slider (even one inside
+    /// an iframe) or a video's controls while leaving ink behind. Every
+    /// gesture recognizer WebKit uses inside the webview (including the one
+    /// that delivers touches to the page) is set to ignore the Pencil.
+    /// WebKit adds recognizers as it goes, so this is re-applied after
+    /// loads and layout.
+    private func keepPencilOffPage() {
+        let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
+        func apply(to view: UIView) {
+            for recognizer in view.gestureRecognizers ?? [] where recognizer.allowedTouchTypes.contains(pencil) {
+                recognizer.allowedTouchTypes = recognizer.allowedTouchTypes.filter { $0 != pencil }
+            }
+            view.subviews.forEach(apply)
+        }
+        apply(to: webView)
     }
 
     private func updateViewport() {
@@ -949,6 +969,7 @@ extension SlideContentView: WKNavigationDelegate {
         log("didFinish")
         didFinishInitialLoad = true
         updateViewport()
+        keepPencilOffPage()
         applyMediaSettings()
         if let targetPosition {
             show(targetPosition)
