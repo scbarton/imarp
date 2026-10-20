@@ -77,11 +77,23 @@ final class SlideContentView: UIView {
                             document.querySelectorAll('[data-imarp-filled]').forEach(function (media) { window.__imarpFill(media, false); });
                         }
                         window.__imarpPosition = { index: event.index, fragment: event.fragmentIndex };
-                        window.webkit.messageHandlers.imarpPosition.postMessage([event.index, event.fragmentIndex]);
+                        // Third value: 1 if the presenter's own touch, click or
+                        // key press (e.g. Marp's swipe) just caused this move.
+                        var byPresenter = Date.now() - window.__imarpPresenterInputAt < 1000 ? 1 : 0;
+                        window.webkit.messageHandlers.imarpPosition.postMessage([event.index, event.fragmentIndex, byPresenter]);
                     });
                 }
                 return result;
             };
+            // When the presenter last touched, clicked or pressed a key on the
+            // page itself (the external display's page never gets any), so a
+            // move that follows is known to be theirs, not bespoke's own.
+            window.__imarpPresenterInputAt = 0;
+            ['touchend', 'mouseup', 'keydown'].forEach(function (type) {
+                window.addEventListener(type, function (event) {
+                    if (event.isTrusted) { window.__imarpPresenterInputAt = Date.now(); }
+                }, true);
+            });
             // Marp's slide transitions run through the View Transitions API.
             // Report when they start and finish, so ink for the outgoing
             // slide can be hidden while the slides animate and the new
@@ -704,7 +716,17 @@ final class SlideContentView: UIView {
         onPositionChanged?(position)
     }
 
-    fileprivate func pageReported(_ position: SlidePosition) {
+    /// `byPresenter`: the page moved because of the presenter's own touch,
+    /// click or key press on it (e.g. Marp's swipe), which, like a toolbar
+    /// step, stops chasing or holding any earlier position and is always
+    /// accepted.
+    fileprivate func pageReported(_ position: SlidePosition, byPresenter: Bool = false) {
+        if byPresenter, targetPosition != nil || holdPosition != nil {
+            log("reported \(position) by the presenter, hold ended")
+            targetPosition = nil
+            holdPosition = nil
+            verifyGeneration += 1
+        }
         if let targetPosition {
             if position == targetPosition {
                 log("reported \(position), target reached")
@@ -927,8 +949,9 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
             target?.transitionReported(active: active)
             return
         }
-        guard let values = message.body as? [Int], values.count == 2, values[0] >= 0 else { return }
-        target?.pageReported(SlidePosition(index: values[0], fragment: max(values[1], 0)))
+        guard let values = message.body as? [Int], values.count >= 2, values[0] >= 0 else { return }
+        let byPresenter = values.count > 2 && values[2] == 1
+        target?.pageReported(SlidePosition(index: values[0], fragment: max(values[1], 0)), byPresenter: byPresenter)
     }
 }
 
