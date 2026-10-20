@@ -57,7 +57,10 @@ final class ExternalDisplayViewController: UIViewController {
             self?.followStore()
         }
         // Mirror what the presenter does with the slide's own HTML on the
-        // iPad. This screen carries the sound for slide videos.
+        // iPad. This screen carries the sound for slide videos, so picture
+        // and sound come from the same copy and stay together; its videos
+        // are painted through a canvas so they show over AirPlay too.
+        slideCanvas.contentView.paintsVideos = true
         NotificationCenter.default.addObserver(forName: .mediaCommand, object: nil, queue: .main) { [weak self] note in
             guard let index = note.userInfo?["index"] as? Int,
                   let playing = note.userInfo?["playing"] as? Bool

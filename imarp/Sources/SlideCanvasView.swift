@@ -196,11 +196,18 @@ final class SlideContentView: UIView {
             // Videos and audio: native controls, mirrored. Media events don't
             // bubble, so listen in the capture phase. Sound comes from the
             // external display when there is one (__imarpMuted, set by the
-            // app), so the iPad's copy plays muted.
+            // app), so the iPad's copy plays muted. While playing, the
+            // position is also reported every couple of seconds, so the
+            // other copy is pulled back into step if it drifts.
             window.__imarpMuted = false;
+            var lastTimeReport = 0;
             function reportMedia(event) {
                 var media = event.target;
                 if (!media || typeof media.play !== 'function') { return; }
+                if (event.type === 'timeupdate') {
+                    if (media.paused || Date.now() - lastTimeReport < 2000) { return; }
+                }
+                lastTimeReport = Date.now();
                 if (event.type === 'play') { media.muted = window.__imarpMuted; }
                 var index = activeInteractive().indexOf(media);
                 if (index < 0) { return; }
@@ -209,7 +216,7 @@ final class SlideContentView: UIView {
                 if (event.type === 'webkitendfullscreen') { body.fullscreen = false; }
                 post('imarpMedia', body);
             }
-            ['play', 'pause', 'seeked', 'ratechange', 'webkitbeginfullscreen', 'webkitendfullscreen'].forEach(function (type) {
+            ['play', 'pause', 'seeked', 'ratechange', 'timeupdate', 'webkitbeginfullscreen', 'webkitendfullscreen'].forEach(function (type) {
                 document.addEventListener(type, reportMedia, true);
             });
             // Other controls (buttons, <details>...): report real taps (not
@@ -262,10 +269,56 @@ final class SlideContentView: UIView {
                 if (!media || typeof media.play !== 'function') { return null; }
                 media.muted = muted;
                 if (typeof rate === 'number' && rate > 0) { media.playbackRate = rate; }
-                if (typeof time === 'number' && Math.abs(media.currentTime - time) > 0.3) { media.currentTime = time; }
+                // Seeking stalls the picture for a moment, so small drift is left alone.
+                if (typeof time === 'number' && Math.abs(media.currentTime - time) > 0.5) { media.currentTime = time; }
                 if (playing) { media.play().catch(function () {}); } else { media.pause(); }
                 return true;
             };
+            // On the external display, slide videos are shown by painting
+            // each frame into a canvas laid over the (transparent) video: a
+            // video's own picture doesn't reach the receiver while the screen
+            // is shared over AirPlay, but a canvas, being ordinary page
+            // content, does. Switched on by the app (__imarpPaintVideos).
+            window.__imarpPaintVideos = false;
+            function paintVideos() {
+                requestAnimationFrame(paintVideos);
+                if (!window.__imarpPaintVideos) { return; }
+                document.querySelectorAll('svg[data-marpit-svg].bespoke-marp-active video').forEach(function (video) {
+                    var canvas = video.__imarpCanvas;
+                    if (!canvas || canvas.parentNode !== video.parentNode) {
+                        canvas = document.createElement('canvas');
+                        canvas.style.position = 'absolute';
+                        canvas.style.pointerEvents = 'none';
+                        video.parentNode.insertBefore(canvas, video.nextSibling);
+                        video.__imarpCanvas = canvas;
+                    }
+                    video.style.opacity = '0';
+                    var width = video.offsetWidth, height = video.offsetHeight;
+                    canvas.style.left = video.offsetLeft + 'px';
+                    canvas.style.top = video.offsetTop + 'px';
+                    canvas.style.width = width + 'px';
+                    canvas.style.height = height + 'px';
+                    canvas.style.zIndex = String((parseInt(getComputedStyle(video).zIndex, 10) || 0) + 1);
+                    var scale = 2;
+                    if (canvas.width !== Math.round(width * scale) || canvas.height !== Math.round(height * scale)) {
+                        canvas.width = Math.round(width * scale);
+                        canvas.height = Math.round(height * scale);
+                    }
+                    var context = canvas.getContext('2d');
+                    if (video.hasAttribute('data-imarp-filled')) {
+                        context.fillStyle = '#000';
+                        context.fillRect(0, 0, canvas.width, canvas.height);
+                    } else {
+                        context.clearRect(0, 0, canvas.width, canvas.height);
+                    }
+                    if (video.readyState < 2 || !video.videoWidth) { return; }
+                    // object-fit: contain, like the video itself.
+                    var fit = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+                    var drawWidth = video.videoWidth * fit, drawHeight = video.videoHeight * fit;
+                    context.drawImage(video, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight);
+                });
+            }
+            requestAnimationFrame(paintVideos);
             // A slide video filling the whole slide (on the external display,
             // the whole screen): what the external display shows while the
             // presenter has the video in iOS's full-screen player on the iPad.
@@ -668,16 +721,27 @@ final class SlideContentView: UIView {
     private var zoomObservations: [NSKeyValueObservation] = []
 
     /// Whether this screen's slide videos play muted (the iPad's, while the
-    /// external display carries the sound).
+    /// external display carries the sound). Muted copies also stay out of
+    /// AirPlay, so the iPad's never takes over the shared screen.
     var mutesMedia = false {
-        didSet { applyMediaMuting() }
+        didSet { applyMediaSettings() }
     }
 
-    private func applyMediaMuting() {
+    /// Whether this screen's slide videos are painted through a canvas
+    /// (the external display's; see paintVideos in the deck hook).
+    var paintsVideos = false {
+        didSet { applyMediaSettings() }
+    }
+
+    private func applyMediaSettings() {
         guard didFinishInitialLoad else { return }
         webView.evaluateJavaScript("""
             window.__imarpMuted = \(mutesMedia);
-            document.querySelectorAll('video, audio').forEach(function (m) { m.muted = \(mutesMedia); });
+            window.__imarpPaintVideos = \(paintsVideos);
+            document.querySelectorAll('video, audio').forEach(function (m) {
+                m.muted = \(mutesMedia);
+                m.disableRemotePlayback = \(mutesMedia);
+            });
             """)
     }
 
@@ -885,7 +949,7 @@ extension SlideContentView: WKNavigationDelegate {
         log("didFinish")
         didFinishInitialLoad = true
         updateViewport()
-        applyMediaMuting()
+        applyMediaSettings()
         if let targetPosition {
             show(targetPosition)
         }
