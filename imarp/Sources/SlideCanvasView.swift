@@ -540,6 +540,61 @@ final class SlideContentView: UIView {
                 }
             });
             if (isTop) { window.__imarpApplyInput = apply; }
+
+            // While the slide is zoomed in, a pinch or pan has to move the
+            // slide even where it starts on a widget. Plots (Plotly's, for
+            // one) claim touches for their own dragging and mark themselves
+            // touch-action: none, which keeps WebKit from zooming or panning
+            // the page there; on a slide that's mostly plot, that left the
+            // presenter stuck zoomed in. So while zoomed, frames keep touches
+            // away from everything but form controls (sliders still work)
+            // and let the page pan and zoom over them. At normal size, plots
+            // behave as usual. The slideshow page passes the zoom state
+            // (__imarpZoomed, set by the app) down to every frame.
+            var zoomed = false;
+            var zoomStyle = null;
+            function isControl(element) {
+                return !!(element && element.closest && element.closest('input, select, textarea, button, label, a[href], summary'));
+            }
+            function keepFromWidget(event) {
+                if (zoomed && !isControl(event.target)) { event.stopPropagation(); }
+            }
+            if (!isTop) {
+                ['touchstart', 'touchmove', 'touchend', 'pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mousemove', 'mouseup', 'wheel'].forEach(function (type) {
+                    window.addEventListener(type, keepFromWidget, { capture: true, passive: true });
+                });
+            }
+            function setZoomed(value) {
+                zoomed = !!value;
+                if (!isTop) {
+                    if (zoomed && !zoomStyle) {
+                        zoomStyle = document.createElement('style');
+                        zoomStyle.textContent = '*:not(input):not(select):not(textarea) { touch-action: auto !important; }';
+                        (document.head || document.documentElement).appendChild(zoomStyle);
+                    } else if (!zoomed && zoomStyle) {
+                        zoomStyle.remove();
+                        zoomStyle = null;
+                    }
+                }
+                frames().forEach(function (frame) {
+                    if (frame.contentWindow) { frame.contentWindow.postMessage({ imarpZoomed: zoomed }, '*'); }
+                });
+            }
+            window.addEventListener('message', function (event) {
+                var data = event.data;
+                if (!data || typeof data !== 'object') { return; }
+                if (typeof data.imarpZoomed === 'boolean' && !isTop) {
+                    setZoomed(data.imarpZoomed);
+                } else if (data.imarpZoomQuery && event.source) {
+                    // A frame that loaded while zoomed asks for the state.
+                    event.source.postMessage({ imarpZoomed: zoomed }, '*');
+                }
+            });
+            if (isTop) {
+                window.__imarpSetZoomed = setZoomed;
+            } else {
+                window.parent.postMessage({ imarpZoomQuery: true }, '*');
+            }
         })();
         """
 
@@ -553,8 +608,18 @@ final class SlideContentView: UIView {
         // fullscreen toggle. Navigation here is driven entirely by our own
         // toolbar (and, on the external display, by nothing at all), so
         // hide that chrome rather than let it show through on either screen.
+        //
+        // Marp's slide overview (see deckHookScript) is never removed once
+        // opened: closing it only makes it transparent and pointer-events:
+        // none. Its iframe, a grid of every slide, stays over the whole page,
+        // and on iOS its scroller still takes vertical drags, so a zoomed-in
+        // slide could then only be panned sideways (with more slides than fit
+        // on one screen, the invisible grid scrolled instead). While closed,
+        // the iframe is taken out of the layout; it keeps its page.
         let hideChromeCSS = """
             .bespoke-marp-osc { display: none !important; }
+            .bespoke-marp-overview:not([data-open]) iframe,
+            .bespoke-marp-overview[data-open=""] iframe { display: none !important; }
             """
         let hideChromeScript = """
             const style = document.createElement('style');
@@ -638,7 +703,7 @@ final class SlideContentView: UIView {
         guard zoomed != pageToldZoomed else { return }
         pageToldZoomed = zoomed
         log("page told zoomed=\(zoomed)")
-        webView.evaluateJavaScript("window.__imarpZoomed = \(zoomed);")
+        webView.evaluateJavaScript("window.__imarpZoomed = \(zoomed); window.__imarpSetZoomed && window.__imarpSetZoomed(\(zoomed));")
     }
 
     /// Logs the page's zoom when it leaves or returns to normal size, or
@@ -1542,13 +1607,36 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.contentOffset = CGPoint(x: origin.x * zoom, y: origin.y * zoom)
     }
 
+    /// Set while the ink layer is being moved to match the page, so its
+    /// zoom and scroll changes aren't pushed straight back to the page (see
+    /// zoomDidChange). Pushing back used to fight the presenter's own pans:
+    /// wherever the ink layer can't scroll as far as the page (vertically,
+    /// in practice), it pulled the page back each time.
+    private var isFollowingPage = false
+
     private func followPageZoom(scale: CGFloat, offset: CGPoint) {
+        isFollowingPage = true
+        defer { isFollowingPage = false }
         if abs(canvasView.zoomScale - scale) > 0.0001 {
             canvasView.setZoomScale(scale, animated: false)
         }
         if abs(canvasView.contentOffset.x - offset.x) > 0.5 || abs(canvasView.contentOffset.y - offset.y) > 0.5 {
             canvasView.contentOffset = offset
         }
+        if abs(canvasView.contentOffset.y - offset.y) > 0.5 || abs(canvasView.contentOffset.x - offset.x) > 0.5 {
+            logZoomMismatch("ink layer couldn't follow the page")
+        }
+    }
+
+    private var lastMismatchLog = Date.distantPast
+
+    private func logZoomMismatch(_ note: String) {
+        guard Date().timeIntervalSince(lastMismatchLog) > 1 else { return }
+        lastMismatchLog = Date()
+        let page = contentView.pageScrollView
+        DebugLog.write("zoom", String(format: "%@: page zoom %.2f offset (%.0f, %.0f) content (%.0f, %.0f); ink zoom %.2f offset (%.0f, %.0f) content (%.0f, %.0f)",
+                                      note, page.zoomScale, page.contentOffset.x, page.contentOffset.y, page.contentSize.width, page.contentSize.height,
+                                      canvasView.zoomScale, canvasView.contentOffset.x, canvasView.contentOffset.y, canvasView.contentSize.width, canvasView.contentSize.height))
     }
 
     @objc private func logGestureState(_ recognizer: UIGestureRecognizer) {
@@ -1564,6 +1652,10 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             name = String(describing: type(of: recognizer))
         }
         DebugLog.write("gesture", "\(name) \(recognizer.state.logName)")
+        if recognizer === contentView.pageScrollView.panGestureRecognizer, recognizer.state == .ended {
+            lastMismatchLog = .distantPast
+            logZoomMismatch("after pan")
+        }
     }
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
@@ -1573,7 +1665,12 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     private func zoomDidChange() {
         let zoom = canvasView.zoomScale
         let offset = canvasView.contentOffset
-        contentView.setZoom(scale: zoom, offset: offset)
+        // The page leads; the ink layer only drives it when it was moved
+        // some other way (reset, the external display mirroring the iPad,
+        // a pinch on the ink layer itself in lasso mode).
+        if !isFollowingPage {
+            contentView.setZoom(scale: zoom, offset: offset)
+        }
         guard isZoomed else {
             onVisibleRegionChanged?(nil)
             return
