@@ -1238,13 +1238,33 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         didSet { updateInkLayer() }
     }
 
+    /// Set while the lasso or ruler is in use. PencilKit's lasso (selecting,
+    /// dragging, its Cut/Copy/Delete menu) and ruler need touches on the
+    /// canvas itself, which the ink layer otherwise refuses so fingers reach
+    /// the slide (see the touch model in init). Meanwhile the ink layer
+    /// takes every touch, fingers included, and PencilKit's drawing gesture
+    /// goes back onto the canvas, its natural home.
+    var inkTakesTouches = false {
+        didSet { updateInkLayer() }
+    }
+
     var isOverviewOpen: Bool { contentView.isOverviewOpen }
     var onOverviewChanged: ((Bool) -> Void)?
 
     private func updateInkLayer() {
         canvasView.isHidden = annotationsHidden || overviewShowing
-        canvasView.drawingGestureRecognizer.isEnabled =
-            isDrawingEnabled && !annotationsHidden && !overviewShowing && !isDrawingSuspended
+        let inkActive = isDrawingEnabled && !annotationsHidden && !overviewShowing && !isDrawingSuspended
+        canvasView.drawingGestureRecognizer.isEnabled = inkActive
+        let takeTouches = inkActive && inkTakesTouches
+        if canvasView.isUserInteractionEnabled != takeTouches {
+            DebugLog.write("ink", takeTouches ? "ink layer takes all touches (lasso/ruler)" : "ink layer passes fingers to the slide")
+        }
+        canvasView.isUserInteractionEnabled = takeTouches
+        // Adding a recognizer to a view moves it there from wherever it was.
+        let home: UIView = takeTouches ? canvasView : self
+        if canvasView.drawingGestureRecognizer.view !== home {
+            home.addGestureRecognizer(canvasView.drawingGestureRecognizer)
+        }
     }
 
     func setOverviewOpen(_ open: Bool) {

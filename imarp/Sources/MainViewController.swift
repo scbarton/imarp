@@ -27,6 +27,7 @@ final class MainViewController: UIViewController {
     /// DebugLog), so the moment something odd happened is easy to find.
     private lazy var markTap = UITapGestureRecognizer(target: self, action: #selector(markTapped))
     private let markLabel = UILabel()
+    private var didStartWithPen = false
 
     /// Typed as `AnyObject` because a stored property can't have an
     /// iOS 27-only type while the deployment target is 17.0; the computed
@@ -292,9 +293,40 @@ final class MainViewController: UIViewController {
         super.viewDidAppear(animated)
         toolPicker.addObserver(slideCanvas.canvasView)
         toolPicker.addObserver(self)
+        if !didStartWithPen {
+            didStartWithPen = true
+            startWithPen()
+        }
+        updateInkTakesTouches()
         toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
         slideCanvas.canvasView.becomeFirstResponder()
         updatePresentButtonTitle()
+    }
+
+    /// The tool picker remembers its tool between launches, so the app could
+    /// start with the lasso or ruler, which take every finger (see
+    /// SlideCanvasView.inkTakesTouches): no swipes, links or sliders until a
+    /// pen is picked. Starting a talk that way would be a nasty surprise, so
+    /// the app always starts with a pen.
+    private func startWithPen() {
+        let lasso: Bool
+        if #available(iOS 18.0, *) {
+            lasso = toolPicker.selectedToolItem is PKToolPickerLassoItem
+        } else {
+            lasso = toolPicker.selectedTool is PKLassoTool
+        }
+        guard lasso || toolPicker.isRulerActive else { return }
+        toolPicker.isRulerActive = false
+        if lasso {
+            if #available(iOS 18.0, *) {
+                if let pen = toolPicker.toolItems.first(where: { $0 is PKToolPickerInkingItem }) {
+                    toolPicker.selectedToolItem = pen
+                }
+            } else {
+                toolPicker.selectedTool = PKInkingTool(.pen)
+            }
+        }
+        DebugLog.write("ipad", "started with the \(lasso ? "lasso" : "ruler") from last time, switched to a pen")
     }
 
     /// The tool picker is only shown while the canvas is first responder, so
@@ -494,6 +526,47 @@ extension MainViewController: UIGestureRecognizerDelegate {
 }
 
 extension MainViewController: PKToolPickerObserver {
+    /// The lasso and ruler only work with touches on the ink layer itself,
+    /// so while either is in use the ink layer takes every touch (see
+    /// SlideCanvasView.inkTakesTouches); fingers go back to the slide once
+    /// a pen or the eraser is picked again.
+    func updateInkTakesTouches() {
+        let lasso: Bool
+        if #available(iOS 18.0, *) {
+            lasso = toolPicker.selectedToolItem is PKToolPickerLassoItem
+        } else {
+            lasso = toolPicker.selectedTool is PKLassoTool
+        }
+        let wasTakingTouches = slideCanvas.inkTakesTouches
+        slideCanvas.inkTakesTouches = lasso || toolPicker.isRulerActive
+        // The tool picker hands the canvas its new tool before telling this
+        // observer, so PencilKit sets the lasso up while its drawing gesture
+        // is still parked outside the canvas (see inkTakesTouches), and that
+        // lasso never selects anything (it draws a plain gray line instead
+        // of the dashed selection loop). Now that the gesture is back on the
+        // canvas, hand the lasso over again so PencilKit sets it up properly.
+        if lasso, !wasTakingTouches {
+            let canvas = slideCanvas.canvasView
+            let tool = canvas.tool
+            canvas.tool = PKInkingTool(.pen)
+            canvas.tool = tool
+            DebugLog.write("ink", "lasso re-applied after the drawing gesture moved back")
+        }
+    }
+
+    func toolPickerSelectedToolDidChange(_ toolPicker: PKToolPicker) {
+        updateInkTakesTouches()
+    }
+
+    @available(iOS 18.0, *)
+    func toolPickerSelectedToolItemDidChange(_ toolPicker: PKToolPicker) {
+        updateInkTakesTouches()
+    }
+
+    func toolPickerIsRulerActiveDidChange(_ toolPicker: PKToolPicker) {
+        updateInkTakesTouches()
+    }
+
     /// A finger on the slide (playing a video, tapping a link) makes the
     /// web page first responder, which hides the tool picker. Whenever it
     /// disappears during plain presenting, hand first responder straight
