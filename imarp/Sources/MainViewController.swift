@@ -23,6 +23,11 @@ final class MainViewController: UIViewController {
         target: self, action: #selector(handlePointerGesture(_:))
     )
 
+    /// A three-finger tap on the slide drops a marker in the log (see
+    /// DebugLog), so the moment something odd happened is easy to find.
+    private lazy var markTap = UITapGestureRecognizer(target: self, action: #selector(markTapped))
+    private let markLabel = UILabel()
+
     /// Typed as `AnyObject` because a stored property can't have an
     /// iOS 27-only type while the deployment target is 17.0; the computed
     /// property below restores the real type behind an availability check.
@@ -179,6 +184,26 @@ final class MainViewController: UIViewController {
         slideCanvas.addGestureRecognizer(hover)
         updatePointerMode()
 
+        markTap.numberOfTouchesRequired = 3
+        markTap.allowedTouchTypes = [UITouch.TouchType.direct.rawValue as NSNumber]
+        markTap.cancelsTouchesInView = false
+        markTap.delegate = self
+        slideCanvas.addGestureRecognizer(markTap)
+        markLabel.text = "  Marked in log  "
+        markLabel.font = .preferredFont(forTextStyle: .headline)
+        markLabel.textColor = .white
+        markLabel.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        markLabel.layer.cornerRadius = 8
+        markLabel.layer.masksToBounds = true
+        markLabel.alpha = 0
+        markLabel.isUserInteractionEnabled = false
+        markLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(markLabel)
+        NSLayoutConstraint.activate([
+            markLabel.centerXAnchor.constraint(equalTo: slideCanvas.centerXAnchor),
+            markLabel.bottomAnchor.constraint(equalTo: slideCanvas.bottomAnchor, constant: -24),
+        ])
+
         NotificationCenter.default.addObserver(forName: .stepRequested, object: nil, queue: .main) { [weak self] note in
             self?.handleStepRequested(note)
         }
@@ -216,6 +241,7 @@ final class MainViewController: UIViewController {
         // display along.
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
+            DebugLog.write("ipad", "became active, re-asserting \(PresentationStore.shared.currentPosition)")
             slideCanvas.show(PresentationStore.shared.currentPosition)
             restoreToolPicker()
         }
@@ -276,6 +302,7 @@ final class MainViewController: UIViewController {
     /// content, a dismissed sheet) leaves it hidden until this runs.
     private func restoreToolPicker() {
         guard !slideCanvas.isOverviewOpen else { return }
+        DebugLog.write("focus", "restoring tool picker (canvas becomes first responder)")
         toolPicker.setVisible(true, forFirstResponder: slideCanvas.canvasView)
         slideCanvas.canvasView.becomeFirstResponder()
     }
@@ -286,7 +313,17 @@ final class MainViewController: UIViewController {
         slideCanvas.configure(position: store.currentPosition, drawing: store.drawing(for: store.currentIndex))
     }
 
+    @objc private func markTapped() {
+        let store = PresentationStore.shared
+        DebugLog.write("mark", "==== MARK ==== slide \(store.currentPosition), canvas zoom \(String(format: "%.2f", slideCanvas.canvasView.zoomScale)), pointer \(store.pointerEnabled ? "on" : "off"), drawing suspended \(slideCanvas.isDrawingSuspended), overview \(slideCanvas.isOverviewOpen), external \(store.externalDisplayActive ? "on" : "off")")
+        slideCanvas.contentView.logPageState("mark")
+        markLabel.layer.removeAllAnimations()
+        markLabel.alpha = 1
+        UIView.animate(withDuration: 0.4, delay: 1.2, options: []) { self.markLabel.alpha = 0 }
+    }
+
     @objc private func previousTapped() {
+        DebugLog.write("ipad", "Prev (toolbar button or key)")
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": false])
     }
 
@@ -294,19 +331,19 @@ final class MainViewController: UIViewController {
     /// one jumps there and closes it. Only on the iPad: the external display
     /// stays on the current slide until a new one is picked, then follows.
     @objc private func slidesTapped() {
+        DebugLog.write("ipad", "Slides (toolbar button or Esc): overview \(slideCanvas.isOverviewOpen ? "closing" : "opening")")
         slideCanvas.setOverviewOpen(!slideCanvas.isOverviewOpen)
     }
 
     @objc private func nextTapped() {
+        DebugLog.write("ipad", "Next (toolbar button or key)")
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": true])
     }
 
     @objc private func clearTapped() {
         let store = PresentationStore.shared
         let index = store.currentIndex
-        #if DEBUG
-        print("[imarp clear] slide \(index), strokes before: \(slideCanvas.canvasView.drawing.strokes.count)")
-        #endif
+        DebugLog.write("ipad", "Clear: slide \(index), strokes before: \(slideCanvas.canvasView.drawing.strokes.count)")
         applyDrawing(PKDrawing(), forSlideIndex: index, actionName: "Clear")
         // Right after a stroke, PencilKit keeps showing it even though the
         // drawing is now empty (the canvas's last stroke lingers on screen
@@ -314,9 +351,7 @@ final class MainViewController: UIViewController {
         // once things settle does; still one Undo step.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self, store.currentIndex == index, store.drawing(for: index).strokes.isEmpty else { return }
-            #if DEBUG
-            print("[imarp clear] slide \(index), strokes after: \(slideCanvas.canvasView.drawing.strokes.count), refreshing")
-            #endif
+            DebugLog.write("ipad", "Clear: slide \(index), strokes after: \(slideCanvas.canvasView.drawing.strokes.count), refreshing")
             slideCanvas.setDrawing(PKDrawing())
         }
     }
@@ -351,6 +386,7 @@ final class MainViewController: UIViewController {
     /// attached, so this is a manual override for suppressing it (e.g. to drop
     /// back to mirroring mid-talk) rather than the thing that starts it.
     @objc private func presentTapped() {
+        DebugLog.write("ipad", "Present/Mirror")
         guard #available(iOS 27.0, *), let registration = displayRegistration else { return }
         registration.isEnabled.toggle()
         // The scene connects/disconnects asynchronously, so let the system
@@ -382,9 +418,7 @@ final class MainViewController: UIViewController {
         let enabled = PresentationStore.shared.pointerEnabled
         pencilPointer.isEnabled = enabled
         slideCanvas.isDrawingSuspended = enabled
-        #if DEBUG
-        print("[imarp pointer] mode \(enabled ? "on" : "off")")
-        #endif
+        DebugLog.write("ipad", "pointer mode \(enabled ? "on" : "off")")
     }
 
     @objc private func handlePointerGesture(_ recognizer: UIGestureRecognizer) {
@@ -410,6 +444,7 @@ final class MainViewController: UIViewController {
     }
 
     @objc private func hideAnnotationsTapped() {
+        DebugLog.write("ipad", "Hide/Show Ink")
         let store = PresentationStore.shared
         let hidden = !store.annotationsHidden
         store.setAnnotationsHidden(hidden)
@@ -443,7 +478,10 @@ final class MainViewController: UIViewController {
     private func handleStepRequested(_ note: Notification) {
         guard let forward = note.userInfo?["forward"] as? Bool else { return }
         // Don't step the deck hidden behind the slide overview.
-        guard !slideCanvas.isOverviewOpen else { return }
+        guard !slideCanvas.isOverviewOpen else {
+            DebugLog.write("ipad", "step ignored: overview open")
+            return
+        }
         // The new position arrives through contentView.onPositionChanged.
         slideCanvas.step(forward: forward)
     }
@@ -451,7 +489,7 @@ final class MainViewController: UIViewController {
 
 extension MainViewController: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        gestureRecognizer === pencilPointer
+        gestureRecognizer === pencilPointer || gestureRecognizer === markTap
     }
 }
 
@@ -463,6 +501,7 @@ extension MainViewController: PKToolPickerObserver {
     /// sheet (file picker, the full-screen video player...) is up, or the
     /// app is going inactive: those hide the picker on purpose.
     func toolPickerVisibilityDidChange(_ toolPicker: PKToolPicker) {
+        DebugLog.write("focus", "tool picker \(toolPicker.isVisible ? "shown" : "hidden")")
         guard !toolPicker.isVisible else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self,

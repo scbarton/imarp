@@ -250,11 +250,13 @@ final class SlideContentView: UIView {
             // never to the page: keep its touches from Marp's swipe (a Pencil
             // stroke must not change slides) and from turning into taps on
             // links or controls. WebKit marks them touchType 'stylus'.
+            function pageLog(text) { post('imarpLog', text); }
             ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
                 window.addEventListener(type, function (event) {
                     var touches = event.changedTouches || [];
                     for (var i = 0; i < touches.length; i++) {
                         if (touches[i].touchType === 'stylus') {
+                            if (type !== 'touchmove') { pageLog('Pencil ' + type + ' reached the page (blocked)'); }
                             event.stopPropagation();
                             if (event.cancelable) { event.preventDefault(); }
                             return;
@@ -267,9 +269,35 @@ final class SlideContentView: UIView {
             // handling (WebKit's panning doesn't depend on them).
             ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
                 window.addEventListener(type, function (event) {
-                    if (window.visualViewport && window.visualViewport.scale > 1.01) { event.stopPropagation(); }
+                    if (window.visualViewport && window.visualViewport.scale > 1.01) {
+                        if (type === 'touchstart') {
+                            pageLog('zoomed (scale ' + window.visualViewport.scale.toFixed(2) + '), so this touch is kept from the Marp swipe');
+                        }
+                        event.stopPropagation();
+                    }
                 }, { capture: true, passive: true });
             });
+            // For the log: every finger touch the page gets (start and end
+            // only), and the page's own zoom whenever it changes noticeably.
+            ['touchstart', 'touchend', 'touchcancel'].forEach(function (type) {
+                window.addEventListener(type, function (event) {
+                    var touch = (event.changedTouches || [])[0];
+                    if (!touch || touch.touchType === 'stylus') { return; }
+                    var target = event.target && event.target.tagName ? event.target.tagName.toLowerCase() : '?';
+                    pageLog(type + ' (' + event.touches.length + ' down) at ' + Math.round(touch.clientX) + ',' +
+                        Math.round(touch.clientY) + ' on ' + target);
+                }, { capture: true, passive: true });
+            });
+            if (window.visualViewport) {
+                var loggedScale = 1;
+                window.visualViewport.addEventListener('resize', function () {
+                    var scale = window.visualViewport.scale;
+                    if ((scale > 1.01) !== (loggedScale > 1.01) || Math.abs(scale - loggedScale) >= 0.25) {
+                        loggedScale = scale;
+                        pageLog('visualViewport scale ' + scale.toFixed(2));
+                    }
+                });
+            }
             window.__imarpActivate = function (index) {
                 var element = activeInteractive()[index];
                 if (element) { element.click(); }
@@ -542,6 +570,7 @@ final class SlideContentView: UIView {
         )
         let messageProxy = WeakScriptMessageHandler()
         configuration.userContentController.add(messageProxy, name: "imarpInput")
+        configuration.userContentController.add(messageProxy, name: "imarpLog")
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
         configuration.userContentController.add(messageProxy, name: "imarpTransition")
         configuration.userContentController.add(messageProxy, name: "imarpOverview")
@@ -553,6 +582,7 @@ final class SlideContentView: UIView {
         // The presenter pinch-zooms the page itself; report it so the ink
         // canvas (and the external display) can follow.
         let reportZoom: (UIScrollView) -> Void = { [weak self] scrollView in
+            self?.logPageZoomIfChanged(scrollView)
             self?.onPageZoomChanged?(scrollView.zoomScale, scrollView.contentOffset)
         }
         zoomObservations = [
@@ -590,9 +620,97 @@ final class SlideContentView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func log(_ message: String) {
-        #if DEBUG
-        print("[imarp \(debugLabel)] \(message)")
-        #endif
+        DebugLog.write(debugLabel, message)
+    }
+
+    private var lastLoggedPageZoom: CGFloat = 1
+
+    /// Logs the page's zoom when it leaves or returns to normal size, or
+    /// changes by a quarter or more, not on every frame of a pinch.
+    private func logPageZoomIfChanged(_ scrollView: UIScrollView) {
+        let scale = scrollView.zoomScale
+        let wasZoomed = lastLoggedPageZoom > 1.001, isZoomed = scale > 1.001
+        guard wasZoomed != isZoomed || abs(scale - lastLoggedPageZoom) >= 0.25 else { return }
+        lastLoggedPageZoom = scale
+        log(String(format: "page zoom %.2f (allowed %.2f...%.2f), offset (%.0f, %.0f)",
+                   scale, scrollView.minimumZoomScale, scrollView.maximumZoomScale,
+                   scrollView.contentOffset.x, scrollView.contentOffset.y))
+    }
+
+    /// Asks the page for its own view of things (slide, zoom, focus), for a
+    /// log marker.
+    func logPageState(_ note: String) {
+        let scrollView = webView.scrollView
+        let pan = scrollView.panGestureRecognizer
+        func types(_ recognizer: UIGestureRecognizer) -> String {
+            recognizer.allowedTouchTypes.compactMap { UITouch.TouchType(rawValue: $0.intValue).map { type -> String in
+                switch type {
+                case .direct: return "finger"
+                case .pencil: return "pencil"
+                case .indirect: return "indirect"
+                case .indirectPointer: return "pointer"
+                default: return "\(type.rawValue)"
+                }
+            } }.joined(separator: "+")
+        }
+        log("\(note): page pan enabled \(pan.isEnabled), state \(pan.state.logName), touches \(pan.minimumNumberOfTouches)...\(pan.maximumNumberOfTouches), types \(types(pan)); scroll enabled \(scrollView.isScrollEnabled), content \(scrollView.contentSize), bounds \(scrollView.bounds.size), offset \(scrollView.contentOffset)")
+        let webGestures = (webView.scrollView.subviews + [webView.scrollView]).flatMap { $0.gestureRecognizers ?? [] }
+        let busy = webGestures.filter { $0.state != .possible || !$0.isEnabled }
+            .map { "\(type(of: $0)) \($0.isEnabled ? $0.state.logName : "disabled")" }
+        log("\(note): web gestures not idle: \(busy.isEmpty ? "none" : busy.joined(separator: ", "))")
+        // Inner scrollers WebKit made for elements in the page (they take
+        // drags in whichever direction they can scroll).
+        var inner: [String] = []
+        func findScrollers(_ view: UIView) {
+            if let scroller = view as? UIScrollView, scroller !== webView.scrollView {
+                let frame = scroller.convert(scroller.bounds, to: webView)
+                inner.append(String(format: "%@ at (%.0f, %.0f) %.0fx%.0f, content %.0fx%.0f, offset (%.0f, %.0f), scroll enabled %@",
+                                    String(describing: type(of: scroller)), frame.minX, frame.minY, frame.width, frame.height,
+                                    scroller.contentSize.width, scroller.contentSize.height,
+                                    scroller.contentOffset.x, scroller.contentOffset.y, String(scroller.isScrollEnabled)))
+            }
+            view.subviews.forEach(findScrollers)
+        }
+        findScrollers(webView.scrollView)
+        log("\(note): \(inner.count) inner scroller(s)\(inner.isEmpty ? "" : ": " + inner.joined(separator: " | "))")
+        let overflowScript = """
+            (function () {
+                var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
+                if (!active) { return 'no active slide'; }
+                var out = [];
+                [active].concat(Array.prototype.slice.call(active.querySelectorAll('*'))).forEach(function (el) {
+                    var cs = getComputedStyle(el);
+                    var over = el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1;
+                    if ((cs.overflowX !== 'visible' || cs.overflowY !== 'visible') && over) {
+                        out.push(el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : '') +
+                            ' overflow ' + cs.overflowX + '/' + cs.overflowY + ' ' + el.clientWidth + 'x' + el.clientHeight + ' -> ' + el.scrollWidth + 'x' + el.scrollHeight);
+                    }
+                });
+                return out.length ? out.join(' | ') : 'none';
+            })();
+            """
+        webView.evaluateJavaScript(overflowScript) { [weak self] result, _ in
+            self?.log("\(note): cropped elements with more content than fits: \(result as? String ?? "?")")
+        }
+        log(String(format: "%@: native page zoom %.2f (allowed %.2f...%.2f), loaded=%@, target=%@, hold=%@",
+                   note, scrollView.zoomScale, scrollView.minimumZoomScale, scrollView.maximumZoomScale,
+                   String(didFinishInitialLoad), String(describing: targetPosition), String(describing: holdPosition)))
+        let script = """
+            (function () {
+                var deck = window.__imarpDeck;
+                var vv = window.visualViewport;
+                var active = document.activeElement;
+                return 'page slide ' + (deck ? deck.slide() : '?') +
+                    ', position ' + JSON.stringify(window.__imarpPosition || null) +
+                    ', visualViewport scale ' + (vv ? vv.scale.toFixed(2) : '?') +
+                    ', overview ' + window.__imarpOverviewOpen +
+                    ', focus ' + (active ? active.tagName : 'none') +
+                    ', viewport meta ' + ((document.querySelector('meta[name=viewport]') || {}).content || 'none');
+            })();
+            """
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            self?.log("\(note): \(result as? String ?? "page didn't answer: \(String(describing: error))")")
+        }
     }
 
     /// Loads a deck (the bundled sample, or one opened from an
@@ -634,13 +752,18 @@ final class SlideContentView: UIView {
     /// loads and layout.
     private func keepPencilOffPage() {
         let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
+        var changed: [String] = []
         func apply(to view: UIView) {
             for recognizer in view.gestureRecognizers ?? [] where recognizer.allowedTouchTypes.contains(pencil) {
                 recognizer.allowedTouchTypes = recognizer.allowedTouchTypes.filter { $0 != pencil }
+                changed.append(String(describing: type(of: recognizer)))
             }
             view.subviews.forEach(apply)
         }
         apply(to: webView)
+        if !changed.isEmpty {
+            log("kept the Pencil off \(changed.count) page gesture(s): \(changed.joined(separator: ", "))")
+        }
     }
 
     private func updateViewport() {
@@ -653,13 +776,11 @@ final class SlideContentView: UIView {
     }
 
     private func logGeometry() {
-        #if DEBUG
         let bounds = webView.bounds.size
         webView.evaluateJavaScript("window.__imarpGeometry()") { [weak self] result, _ in
             let values = (result as? [Double])?.map { String(format: "%.1f", $0) }.joined(separator: ", ") ?? "?"
             self?.log("geometry view=\(bounds) page[innerW, innerH, slideX, slideY, slideW, slideH]=[\(values)]")
         }
-        #endif
     }
 
     /// Puts the deck at exactly `position` (slide and revealed fragments),
@@ -743,7 +864,7 @@ final class SlideContentView: UIView {
             show(holdPosition)
             return
         }
-        log("reported \(position)")
+        log("reported \(position)\(byPresenter ? " (presenter's own touch or key)" : "")")
         settle(on: position)
     }
 
@@ -757,6 +878,9 @@ final class SlideContentView: UIView {
 
     /// The presenter tapped one of the current slide's other HTML controls.
     var onControlActivated: ((Int) -> Void)?
+
+    /// The page's scroll view, which does its pinch-zoom and panning.
+    var pageScrollView: UIScrollView { webView.scrollView }
 
     /// The page's own (pinch) zoom and scroll position changed.
     var onPageZoomChanged: ((CGFloat, CGPoint) -> Void)?
@@ -816,6 +940,10 @@ final class SlideContentView: UIView {
               let json = String(data: data, encoding: .utf8)
         else { return }
         webView.evaluateJavaScript("window.__imarpApplyInput && window.__imarpApplyInput(\(json))")
+    }
+
+    fileprivate func pageLogged(_ text: String) {
+        log("page: \(text)")
     }
 
     fileprivate func formInputReported(_ change: [String: Any]) {
@@ -929,6 +1057,10 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "imarpMedia" {
             if let info = message.body as? [String: Any] { target?.mediaReported(info) }
+            return
+        }
+        if message.name == "imarpLog" {
+            if let text = message.body as? String { target?.pageLogged(text) }
             return
         }
         if message.name == "imarpInput" {
@@ -1138,6 +1270,22 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.isUserInteractionEnabled = false
         addGestureRecognizer(canvasView.drawingGestureRecognizer)
         canvasView.delegate = self
+        // For the log: every touch over the slide, and when the gestures
+        // that compete for them (PencilKit's drawing, the page's pinch and
+        // pan) start and stop.
+        let touchLogger = TouchLogger(target: nil, action: nil)
+        touchLogger.describeLocation = { [weak self] touch in
+            guard let self else { return "?" }
+            let rect = Self.slideRect(in: bounds.size, aspectRatio: PresentationStore.shared.slideAspectRatio)
+            let location = touch.location(in: canvasView)
+            let zoom = canvasView.zoomScale
+            guard rect.width > 0, rect.height > 0 else { return "(\(Int(location.x)), \(Int(location.y)))" }
+            return String(format: "slide (%.2f, %.2f)", (location.x / zoom - rect.minX) / rect.width, (location.y / zoom - rect.minY) / rect.height)
+        }
+        addGestureRecognizer(touchLogger)
+        canvasView.drawingGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
+        contentView.pageScrollView.pinchGestureRecognizer?.addTarget(self, action: #selector(logGestureState(_:)))
+        contentView.pageScrollView.panGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
         contentView.onTransitionActiveChanged = { [weak self] active in
             self?.setInkSuppressedForTransition(active)
         }
@@ -1362,6 +1510,25 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         }
     }
 
+    @objc private func logGestureState(_ recognizer: UIGestureRecognizer) {
+        guard recognizer.state != .changed else { return }
+        let name: String
+        if recognizer === canvasView.drawingGestureRecognizer {
+            name = isDrawingSuspended ? "drawing gesture (suspended for pointer)" : "drawing gesture"
+        } else if recognizer === contentView.pageScrollView.pinchGestureRecognizer {
+            name = "page pinch"
+        } else if recognizer === contentView.pageScrollView.panGestureRecognizer {
+            name = "page pan"
+        } else {
+            name = String(describing: type(of: recognizer))
+        }
+        DebugLog.write("gesture", "\(name) \(recognizer.state.logName)")
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        DebugLog.write("zoom", String(format: "ink layer zoom ended at %.2f, page at %.2f", scale, contentView.pageScrollView.zoomScale))
+    }
+
     private func zoomDidChange() {
         let zoom = canvasView.zoomScale
         let offset = canvasView.contentOffset
@@ -1401,9 +1568,7 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        #if DEBUG
-        print("[imarp ink] canvas frame=\(canvasView.frame) offset=\(canvasView.contentOffset) inset=\(canvasView.adjustedContentInset) drawing bounds=\(canvasView.drawing.bounds)")
-        #endif
+        DebugLog.write("ink", "\(canvasView.drawing.strokes.count) strokes, canvas zoom \(String(format: "%.2f", canvasView.zoomScale))")
         onDrawingChanged?(canvasView.drawing)
     }
 }

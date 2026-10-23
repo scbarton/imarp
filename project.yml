@@ -24,6 +24,9 @@ targets:
       path: imarp/Resources/Info.plist
       properties:
         UILaunchScreen: {}
+        # Shows Documents (where DebugLog writes its Logs folder) in the
+        # Files app, so logs can be shared without a Mac.
+        UIFileSharingEnabled: true
         # Deliberately NOT setting UIRequiresFullScreen. It marks the app as
         # single-window / no-multitasking on iPadOS, which contradicts
         # UIApplicationSupportsMultipleScenes below — and the external display
