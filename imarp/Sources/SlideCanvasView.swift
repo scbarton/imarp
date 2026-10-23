@@ -266,12 +266,17 @@ final class SlideContentView: UIView {
             });
             // While the page is pinch-zoomed, a one-finger drag should pan,
             // not swipe to another slide: keep touches from Marp's own swipe
-            // handling (WebKit's panning doesn't depend on them).
+            // handling (WebKit's panning doesn't depend on them). Whether it's
+            // zoomed comes from the app (__imarpZoomed), which reads WebKit's
+            // own zoom: the page's visualViewport.scale can miss its last
+            // update after a quick pinch out and stay above 1, which would
+            // leave swipes switched off until the next zoom.
+            window.__imarpZoomed = false;
             ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
                 window.addEventListener(type, function (event) {
-                    if (window.visualViewport && window.visualViewport.scale > 1.01) {
+                    if (window.__imarpZoomed) {
                         if (type === 'touchstart') {
-                            pageLog('zoomed (scale ' + window.visualViewport.scale.toFixed(2) + '), so this touch is kept from the Marp swipe');
+                            pageLog('zoomed, so this touch is kept from the Marp swipe');
                         }
                         event.stopPropagation();
                     }
@@ -583,6 +588,7 @@ final class SlideContentView: UIView {
         // canvas (and the external display) can follow.
         let reportZoom: (UIScrollView) -> Void = { [weak self] scrollView in
             self?.logPageZoomIfChanged(scrollView)
+            self?.tellPageIfZoomed(scrollView.zoomScale > 1.01)
             self?.onPageZoomChanged?(scrollView.zoomScale, scrollView.contentOffset)
         }
         zoomObservations = [
@@ -624,6 +630,16 @@ final class SlideContentView: UIView {
     }
 
     private var lastLoggedPageZoom: CGFloat = 1
+    private var pageToldZoomed = false
+
+    /// Keeps the page's __imarpZoomed (which switches Marp's swipe off while
+    /// zoomed in) in step with WebKit's actual zoom.
+    private func tellPageIfZoomed(_ zoomed: Bool) {
+        guard zoomed != pageToldZoomed else { return }
+        pageToldZoomed = zoomed
+        log("page told zoomed=\(zoomed)")
+        webView.evaluateJavaScript("window.__imarpZoomed = \(zoomed);")
+    }
 
     /// Logs the page's zoom when it leaves or returns to normal size, or
     /// changes by a quarter or more, not on every frame of a pinch.
@@ -703,6 +719,7 @@ final class SlideContentView: UIView {
                 return 'page slide ' + (deck ? deck.slide() : '?') +
                     ', position ' + JSON.stringify(window.__imarpPosition || null) +
                     ', visualViewport scale ' + (vv ? vv.scale.toFixed(2) : '?') +
+                    ', swipe guard zoomed=' + window.__imarpZoomed +
                     ', overview ' + window.__imarpOverviewOpen +
                     ', focus ' + (active ? active.tagName : 'none') +
                     ', viewport meta ' + ((document.querySelector('meta[name=viewport]') || {}).content || 'none');
@@ -717,6 +734,7 @@ final class SlideContentView: UIView {
     /// `.marpbundle`), replacing whatever was previously shown.
     func load(htmlURL: URL, directory: URL, at position: SlidePosition = .start) {
         log("load \(htmlURL.lastPathComponent) at \(position)")
+        pageToldZoomed = false
         didFinishInitialLoad = false
         targetPosition = nil
         holdPosition = nil
@@ -1125,6 +1143,9 @@ extension SlideContentView: WKNavigationDelegate {
         didFinishInitialLoad = true
         updateViewport()
         keepPencilOffPage()
+        // A (re)loaded page starts out thinking it isn't zoomed.
+        pageToldZoomed = false
+        tellPageIfZoomed(webView.scrollView.zoomScale > 1.01)
         applyMediaSettings()
         if let targetPosition {
             show(targetPosition)
