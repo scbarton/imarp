@@ -589,7 +589,15 @@ extension MainViewController: PKToolPickerObserver {
 }
 
 extension MainViewController: UIDocumentPickerDelegate {
+    /// The tool picker hides while the file picker is up, and isn't brought
+    /// back then (see toolPickerVisibilityDidChange), so bring it back once
+    /// the file picker is done, whether or not a deck was picked.
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        DispatchQueue.main.async { [weak self] in self?.restoreToolPicker() }
+    }
+
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        DispatchQueue.main.async { [weak self] in self?.restoreToolPicker() }
         guard let bundleURL = urls.first else { return }
 
         // Opening in place (see openTapped) means this URL is
