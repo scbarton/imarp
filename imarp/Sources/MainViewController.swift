@@ -75,7 +75,6 @@ final class MainViewController: UIViewController {
         // canvas (kept clear for the home indicator) doesn't show as a band.
         view.backgroundColor = .black
 
-        slideCanvas.isDrawingEnabled = true
         slideCanvas.onDrawingChanged = { [weak self] drawing in
             guard self != nil else { return }
             let store = PresentationStore.shared
@@ -341,6 +340,13 @@ final class MainViewController: UIViewController {
 
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
+        // Nothing to draw on until a deck is open (ink on the gray start
+        // screen would belong to no deck and couldn't be saved).
+        slideCanvas.isDrawingEnabled = store.hasDeck
+        // Behind the gray start screen, the strip kept clear for the home
+        // indicator is gray too, so the gray fills the window out to its
+        // rounded corners (black would leave a square-cornered gray box).
+        view.backgroundColor = store.hasDeck ? .black : PresentationStore.startScreenGray
         slideCanvas.loadDeck(htmlURL: store.deckHTMLURL, directory: store.deckDirectory, at: store.currentPosition)
         slideCanvas.configure(position: store.currentPosition, drawing: store.drawing(for: store.currentIndex))
     }

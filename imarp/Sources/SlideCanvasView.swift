@@ -795,8 +795,8 @@ final class SlideContentView: UIView {
         }
     }
 
-    /// Loads a deck (the bundled sample, or one opened from an
-    /// `.marpbundle`), replacing whatever was previously shown.
+    /// Loads a deck opened from an `.marpbundle` (or the gray start screen),
+    /// replacing whatever was previously shown.
     func load(htmlURL: URL, directory: URL, at position: SlidePosition = .start) {
         log("load \(htmlURL.lastPathComponent) at \(position)")
         pageToldZoomed = false
@@ -871,6 +871,8 @@ final class SlideContentView: UIView {
     /// so calling it to re-assert the current position never disturbs the
     /// revealed bullets.
     func show(_ position: SlidePosition) {
+        // The gray start screen has no slides to go to.
+        guard loadedURL != PresentationStore.startScreenURL else { return }
         log("show \(position) loaded=\(didFinishInitialLoad)")
         lastKnownPosition = position
         targetPosition = position

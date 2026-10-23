@@ -12,11 +12,7 @@ targets:
       - path: imarp/Sources
       - path: imarp/Resources
         excludes:
-          - "Deck/**"
           - "MarpEngine/**"
-      - path: imarp/Resources/Deck
-        type: folder
-        buildPhase: resources
       - path: imarp/Resources/MarpEngine
         type: folder
         buildPhase: resources

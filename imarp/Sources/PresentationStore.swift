@@ -108,7 +108,7 @@ final class PresentationStore {
     /// `ink/<slideIndex>.drawing` — kept separate from `source.md`/
     /// `source.html` so that re-exporting from BBEdit (which only touches
     /// those two files) never wipes annotations. `nil` for the bundled
-    /// sample deck, which lives inside the read-only app bundle and so keeps
+    /// gray start screen shown before any deck is opened, which has no ink;
     /// ink in-memory only, same as before persistence existed.
     private(set) var bundleURL: URL?
 
@@ -159,16 +159,28 @@ final class PresentationStore {
         NotificationCenter.default.post(name: .slideZoomDidChange, object: nil, userInfo: userInfo)
     }
 
+    /// Whether a deck is open (as opposed to the gray start screen).
+    var hasDeck: Bool { bundleURL != nil }
+
+    /// The start screen's gray, also used behind it on the iPad (see
+    /// MainViewController.reloadDeckFromStore).
+    static let startScreenGray = UIColor(white: 0x55 / 255.0, alpha: 1)
+
+    /// A plain gray page, shown on both screens until a deck is opened.
+    static let startScreenURL: URL = {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("imarp-start.html")
+        let html = """
+            <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">\
+            <style>html, body { margin: 0; height: 100%; background: #555; }</style></head><body></body></html>
+            """
+        try? html.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }()
+
     private init() {
-        // Bundled sample deck, shown until the user opens an .marpbundle.
-        guard let url = Bundle.main.url(forResource: "deck", withExtension: "html", subdirectory: "Deck") else {
-            fatalError("Bundled sample deck (Deck/deck.html) is missing from the app bundle")
-        }
-        deckHTMLURL = url
-        deckDirectory = url.deletingLastPathComponent()
-        let html = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        slideCount = MarpBundleLoader.slideCount(in: html)
-        slideAspectRatio = MarpBundleLoader.slideAspectRatio(in: html)
+        deckHTMLURL = Self.startScreenURL
+        deckDirectory = Self.startScreenURL.deletingLastPathComponent()
+        slideCount = 0
 
         // Backgrounding (or an interruption that precedes termination) is
         // the one moment ink could otherwise be lost mid-debounce.
