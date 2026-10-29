@@ -69,6 +69,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.powrbox.imarp
         TARGETED_DEVICE_FAMILY: "2"
+        # Also runs on Apple silicon Macs as an iPad app ("Designed for iPad").
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
         SWIFT_VERSION: "5.0"
         ASSETSCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEVELOPMENT_TEAM: WR7X27PQB5
