@@ -74,8 +74,9 @@ enum MarpBundleLoader {
     /// Loads a deck: a `.marpbundle`, or a Markdown file (see
     /// `markdownExtensions`) with its files beside it.
     static func load(from url: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
+        let isMarkdown = markdownExtensions.contains(url.pathExtension.lowercased())
         let layout: Layout
-        if markdownExtensions.contains(url.pathExtension.lowercased()) {
+        if isMarkdown {
             let folder = url.deletingLastPathComponent()
             let name = url.deletingPathExtension().lastPathComponent
             layout = Layout(
@@ -96,7 +97,103 @@ enum MarpBundleLoader {
                 name: url.lastPathComponent
             )
         }
-        load(layout, completion: completion)
+        guard isMarkdown else {
+            load(layout, completion: completion)
+            return
+        }
+        // A bundle is downloaded from iCloud as one item when it's picked; a
+        // Markdown deck's neighbors are separate files, and on the iPad iCloud
+        // leaves them in the cloud until something asks for each one. WebKit
+        // can't, so an image not yet downloaded just doesn't appear. So the
+        // theme is fetched before rendering, and every file the slides refer
+        // to (and the files those widget pages load) before showing them.
+        DispatchQueue.global(qos: .userInitiated).async {
+            ensureDownloaded([layout.markdownURL, layout.themeURL])
+            DispatchQueue.main.async {
+                load(layout) { result in
+                    guard case .success(let contents) = result else {
+                        completion(result)
+                        return
+                    }
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        downloadReferencedFiles(of: contents.deckHTMLURL, in: layout.deckDirectory)
+                        DispatchQueue.main.async { completion(result) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Makes sure these iCloud files are on this device, waiting for any
+    /// download. A coordinated read is the documented way to have iCloud
+    /// fetch an item; it returns once the file is local. Files that don't
+    /// exist (locally or in iCloud) are skipped. Call off the main thread.
+    @discardableResult
+    private static func ensureDownloaded(_ urls: [URL]) -> (fetched: Int, missing: [String]) {
+        var fetched = 0
+        var missing: [String] = []
+        for url in urls {
+            let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+            let isUbiquitous = values?.isUbiquitousItem ?? false
+            if FileManager.default.fileExists(atPath: url.path), !isUbiquitous || values?.ubiquitousItemDownloadingStatus == .current {
+                continue
+            }
+            guard isUbiquitous else {
+                // Not here and not in iCloud: a reference to nothing.
+                missing.append(url.lastPathComponent)
+                continue
+            }
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            var coordinationError: NSError?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { _ in }
+            if FileManager.default.fileExists(atPath: url.path) { fetched += 1 } else { missing.append(url.lastPathComponent) }
+        }
+        return (fetched, missing)
+    }
+
+    /// Downloads every local file `htmlURL` refers to (src, href, CSS url()),
+    /// and the files referred to by any HTML pages among them (widget
+    /// iframes), staying inside `directory`.
+    private static func downloadReferencedFiles(of htmlURL: URL, in directory: URL) {
+        var seen = Set<String>()
+        var pages = [htmlURL]
+        var fetched = 0
+        var missing: [String] = []
+        while let page = pages.popLast() {
+            guard let html = try? String(contentsOf: page, encoding: .utf8) else { continue }
+            let references = localReferences(in: html, relativeTo: page.deletingLastPathComponent())
+                .filter { $0.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path) }
+                .filter { seen.insert($0.standardizedFileURL.path).inserted }
+            let result = ensureDownloaded(references)
+            fetched += result.fetched
+            missing += result.missing
+            pages += references.filter { ["html", "htm"].contains($0.pathExtension.lowercased()) }
+        }
+        DebugLog.write("store", "deck files: \(seen.count) referenced, \(fetched) downloaded from iCloud\(missing.isEmpty ? "" : ", missing: " + missing.joined(separator: ", "))")
+    }
+
+    /// Relative file references in an HTML page: src= and href= attributes
+    /// and CSS url(), leaving out web addresses, data: URLs and in-page links.
+    private static func localReferences(in html: String, relativeTo base: URL) -> [URL] {
+        let text = html.replacingOccurrences(of: "&quot;", with: "\"")
+        let patterns = [#"(?:src|href)\s*=\s*"([^"]+)""#, #"(?:src|href)\s*=\s*'([^']+)'"#, #"url\(\s*["']?([^"')]+)["']?\s*\)"#]
+        var urls: [URL] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let range = Range(match.range(at: 1), in: text) else { continue }
+                var reference = String(text[range]).trimmingCharacters(in: .whitespaces)
+                let lower = reference.lowercased()
+                if reference.isEmpty || reference.hasPrefix("#") || reference.hasPrefix("//") || lower.hasPrefix("data:")
+                    || lower.range(of: "^[a-z][a-z0-9+.-]*:", options: .regularExpression) != nil {
+                    continue
+                }
+                if let cut = reference.firstIndex(where: { $0 == "?" || $0 == "#" }) { reference = String(reference[..<cut]) }
+                guard let decoded = reference.removingPercentEncoding else { continue }
+                urls.append(URL(fileURLWithPath: decoded, relativeTo: base).standardizedFileURL)
+            }
+        }
+        return urls
     }
 
     private static func load(_ layout: Layout, completion: @escaping (Result<Contents, Error>) -> Void) {
