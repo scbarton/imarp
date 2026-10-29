@@ -89,12 +89,25 @@ final class PresentationStore {
     private(set) var deckDirectory: URL
     private(set) var slideCount: Int
 
-    /// Slide width÷height for the loaded deck, and the size of the canvas the
-    /// presenter actually draws on. Together these let the external display
-    /// map ink from the iPad's slide rect onto its own — see
-    /// `SlideCanvasView.setDrawing(_:authoredOnCanvasOfSize:aspectRatio:)`.
+    /// Slide width÷height for the loaded deck.
     private(set) var slideAspectRatio: CGFloat = 16.0 / 9.0
-    private(set) var authoringCanvasSize: CGSize = .zero
+
+    /// Ink is kept (in memory and on disk) in slide space: coordinates on a
+    /// slide this size, 1280 wide like an exported PDF page, whatever size the
+    /// slide is shown at. Each screen maps it onto its own slide rect (see
+    /// SlideCanvasView.setDrawing), so it lands on the same spot on the iPad,
+    /// the external display, a Mac window or a PDF page.
+    var slideSpaceSize: CGSize {
+        let aspect = slideAspectRatio > 0 ? slideAspectRatio : 16.0 / 9.0
+        return CGSize(width: 1280, height: (1280 / aspect).rounded())
+    }
+
+    /// Ink saved before slide space (`ink/<n>.drawing`, not
+    /// `ink/<n>.slide.drawing`) is in the points of the iPad canvas it was
+    /// drawn on: always this iPad, full screen in landscape, where the canvas
+    /// is 1194 x 738. It's mapped into slide space when read; the old file
+    /// is left alone.
+    private static let legacyCanvasSize = CGSize(width: 1194, height: 738)
 
     /// Updated by the main scene once its step completes. The single source
     /// of truth for what's on screen: the external display mirrors it, and
@@ -220,20 +233,40 @@ final class PresentationStore {
     }
 
     private func inkFileURL(for slideIndex: Int) -> URL? {
+        bundleURL?.appendingPathComponent("ink/\(slideIndex).slide.drawing")
+    }
+
+    private func legacyInkFileURL(for slideIndex: Int) -> URL? {
         bundleURL?.appendingPathComponent("ink/\(slideIndex).drawing")
     }
 
+    /// Reads `<n>.slide.drawing` (slide space) where there is one, and
+    /// otherwise maps an old `<n>.drawing` (iPad canvas points) into slide
+    /// space.
     private func loadInkFromDisk() {
         guard let bundleURL else { return }
         let inkDirectory = bundleURL.appendingPathComponent("ink", isDirectory: true)
         guard let files = try? FileManager.default.contentsOfDirectory(at: inkDirectory, includingPropertiesForKeys: nil) else { return }
+        var current: [Int: PKDrawing] = [:]
+        var legacy: [Int: PKDrawing] = [:]
         for file in files where file.pathExtension == "drawing" {
-            guard let slideIndex = Int(file.deletingPathExtension().lastPathComponent),
+            let stem = file.deletingPathExtension().lastPathComponent
+            let isCurrent = stem.hasSuffix(".slide")
+            guard let slideIndex = Int(isCurrent ? String(stem.dropLast(6)) : stem),
                   let data = try? Data(contentsOf: file),
                   let drawing = try? PKDrawing(data: data)
             else { continue }
+            if isCurrent { current[slideIndex] = drawing } else { legacy[slideIndex] = drawing }
+        }
+        let fromLegacy = SlideCanvasView.inkTransform(from: Self.legacyCanvasSize, to: slideSpaceSize, aspectRatio: slideAspectRatio)
+        for (slideIndex, drawing) in legacy where current[slideIndex] == nil {
+            guard let fromLegacy else { continue }
+            drawings[slideIndex] = drawing.transformed(using: fromLegacy)
+        }
+        for (slideIndex, drawing) in current where !drawing.strokes.isEmpty {
             drawings[slideIndex] = drawing
         }
+        DebugLog.write("store", "ink: \(current.count) slide-space file(s), \(legacy.filter { current[$0.key] == nil }.count) old file(s) converted")
     }
 
     private func scheduleInkSave(for slideIndex: Int) {
@@ -262,19 +295,15 @@ final class PresentationStore {
         let fm = FileManager.default
         // Clearing a slide's ink removes its file entirely rather than
         // writing an empty PKDrawing, so a cleared slide doesn't linger as
-        // clutter in the bundle.
-        guard !drawing.strokes.isEmpty else {
+        // clutter in the bundle; unless an old-format file is still there,
+        // which an empty slide-space file has to override.
+        let hasLegacy = legacyInkFileURL(for: slideIndex).map { fm.fileExists(atPath: $0.path) } ?? false
+        guard !drawing.strokes.isEmpty || hasLegacy else {
             try? fm.removeItem(at: fileURL)
             return
         }
         try? fm.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? drawing.dataRepresentation().write(to: fileURL, options: .atomic)
-    }
-
-    /// Recorded by the main scene whenever its canvas lays out, so ink can be
-    /// rescaled for the external display's differently-sized canvas.
-    func setAuthoringCanvasSize(_ size: CGSize) {
-        authoringCanvasSize = size
     }
 
     func setCurrentPosition(_ position: SlidePosition) {

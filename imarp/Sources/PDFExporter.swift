@@ -78,8 +78,10 @@ enum PDFExporter {
         let aspectRatio = store.slideAspectRatio > 0 ? store.slideAspectRatio : 16.0 / 9.0
         let pageSize = CGSize(width: pageWidth, height: (pageWidth / aspectRatio).rounded())
         let pageRect = CGRect(origin: .zero, size: pageSize)
+        // Ink is kept in slide space, a slide this same size, so this is
+        // normally no change at all.
         let inkTransform = SlideCanvasView.inkTransform(
-            from: store.authoringCanvasSize, to: pageSize, aspectRatio: aspectRatio
+            from: store.slideSpaceSize, to: pageSize, aspectRatio: aspectRatio
         )
 
         let hostFrame = CGRect(x: window.bounds.width + 100, y: 0, width: pageSize.width, height: pageSize.height)

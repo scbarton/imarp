@@ -1394,38 +1394,6 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.drawingGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
         contentView.pageScrollView.pinchGestureRecognizer?.addTarget(self, action: #selector(logGestureState(_:)))
         contentView.pageScrollView.panGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
-        contentView.onTransitionActiveChanged = { [weak self] active in
-            self?.setInkSuppressedForTransition(active)
-        }
-        contentView.onOverviewChanged = { [weak self] open in
-            guard let self else { return }
-            overviewShowing = open
-            onOverviewChanged?(open)
-        }
-        // Pinch-zoom happens natively in the page; the ink follows it.
-        contentView.onPageZoomChanged = { [weak self] scale, offset in
-            self?.followPageZoom(scale: scale, offset: offset)
-        }
-
-        addSubview(contentView)
-        addSubview(canvasView)
-        // Above the ink layer, so the pointer stays visible even while
-        // drawing is on screen.
-        addSubview(pointerDotView)
-        NSLayoutConstraint.activate([
-            contentView.topAnchor.constraint(equalTo: topAnchor),
-            contentView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            canvasView.topAnchor.constraint(equalTo: topAnchor),
-            canvasView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            canvasView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            canvasView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pointerDotView.topAnchor.constraint(equalTo: topAnchor),
-            pointerDotView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            pointerDotView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            pointerDotView.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -1457,19 +1425,6 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             width: fitted.width,
             height: fitted.height
         )
-    }
-
-    /// Displays ink drawn on a different-sized canvas. Ink is stored in the
-    /// authoring canvas's points, so putting it on the larger external canvas
-    /// unchanged leaves it clustered in one corner at the wrong scale; this
-    /// maps the source slide rect onto this canvas's slide rect so a stroke
-    /// stays over the same part of the slide on both screens.
-    func setDrawing(_ drawing: PKDrawing, authoredOnCanvasOfSize sourceSize: CGSize, aspectRatio: CGFloat) {
-        guard let transform = Self.inkTransform(from: sourceSize, to: bounds.size, aspectRatio: aspectRatio) else {
-            setDrawing(drawing)
-            return
-        }
-        setDrawing(drawing.transformed(using: transform))
     }
 
     /// Maps ink drawn on a canvas of `sourceSize` onto one of
@@ -1511,13 +1466,58 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         }
     }
 
+    /// Ink comes and goes in slide space (see PresentationStore.slideSpaceSize):
+    /// coordinates on a fixed-size slide, the same on every screen. On the
+    /// canvas it's in this view's own points, with the slide wherever it's
+    /// letterboxed to, so it's mapped across both ways. The canvas's size at
+    /// the time of the last mapping, so a resize can re-place the ink.
+    private var inkLayoutSize: CGSize = .zero
+    private var pendingSlideDrawing: PKDrawing?
+    private var isSettingDrawing = false
+
+    private func slideSpaceToCanvas(for size: CGSize) -> CGAffineTransform? {
+        let store = PresentationStore.shared
+        return Self.inkTransform(from: store.slideSpaceSize, to: size, aspectRatio: store.slideAspectRatio)
+    }
+
+    /// Shows `drawing`, in slide space. Doesn't count as an edit: nothing is
+    /// reported through onDrawingChanged (so it isn't saved again).
     func setDrawing(_ drawing: PKDrawing) {
+        guard bounds.width > 0, bounds.height > 0, let transform = slideSpaceToCanvas(for: bounds.size) else {
+            // Not laid out yet; placed once it is (see layoutSubviews).
+            pendingSlideDrawing = drawing
+            return
+        }
+        pendingSlideDrawing = nil
+        inkLayoutSize = bounds.size
+        placeOnCanvas(drawing.transformed(using: transform))
+    }
+
+    private func placeOnCanvas(_ drawing: PKDrawing) {
+        isSettingDrawing = true
         canvasView.drawing = drawing
+        isSettingDrawing = false
         // PKCanvasView doesn't always invalidate its rendered tile cache on a
         // programmatic (non-gesture) assignment, most visibly when swapping
         // to an empty PKDrawing() — the strokes are gone from the model but
         // stale pixels remain on screen until something forces a redraw.
         canvasView.setNeedsDisplay()
+    }
+
+    /// Follows a resize (a Mac window, rotation, the external display's
+    /// final size), keeping the ink on the same part of the slide.
+    private func replaceInkForCurrentSize() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if let pending = pendingSlideDrawing {
+            setDrawing(pending)
+            return
+        }
+        guard bounds.size != inkLayoutSize else { return }
+        let aspect = PresentationStore.shared.slideAspectRatio
+        if inkLayoutSize != .zero, let transform = Self.inkTransform(from: inkLayoutSize, to: bounds.size, aspectRatio: aspect) {
+            placeOnCanvas(canvasView.drawing.transformed(using: transform))
+        }
+        inkLayoutSize = bounds.size
     }
 
     func show(_ position: SlidePosition) {
@@ -1705,10 +1705,15 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             if canvasView.contentSize != bounds.size { canvasView.contentSize = bounds.size }
             if canvasView.contentOffset != .zero { canvasView.contentOffset = .zero }
         }
+        replaceInkForCurrentSize()
     }
 
+    /// Reports the presenter's own edits, in slide space.
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        guard !isSettingDrawing else { return }
         DebugLog.write("ink", "\(canvasView.drawing.strokes.count) strokes, canvas zoom \(String(format: "%.2f", canvasView.zoomScale))")
-        onDrawingChanged?(canvasView.drawing)
+        guard let toCanvas = slideSpaceToCanvas(for: bounds.size) else { return }
+        onDrawingChanged?(canvasView.drawing.transformed(using: toCanvas.inverted()))
     }
 }
+

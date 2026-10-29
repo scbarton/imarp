@@ -281,13 +281,6 @@ final class MainViewController: UIViewController {
         displayRegistration = registerSceneAccessory(accessory)
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        // The external display rescales ink relative to this size, so it has
-        // to reflect the canvas ink is actually drawn on (and follow rotation).
-        PresentationStore.shared.setAuthoringCanvasSize(slideCanvas.bounds.size)
-    }
-
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         toolPicker.addObserver(slideCanvas.canvasView)

@@ -127,13 +127,6 @@ final class ExternalDisplayViewController: UIViewController {
         DispatchQueue.main.async { store.externalDisplayActive = false }
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        // The rescale depends on this canvas's bounds, which aren't final when
-        // the scene first connects — redo it once they are.
-        if let currentIndex { showRescaledDrawing(for: currentIndex) }
-    }
-
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
         // Not hardcoded to 0: the scene can be recreated (e.g. after the app
@@ -146,16 +139,10 @@ final class ExternalDisplayViewController: UIViewController {
         slideCanvas.setDrawing(PKDrawing())
     }
 
-    /// Ink arrives in the iPad canvas's coordinate space, which is a different
-    /// size (and often a different shape) from this display's, so it has to be
-    /// mapped across rather than shown as-is.
+    /// Ink is kept in slide space, so the canvas maps it onto this display's
+    /// own slide rect itself (and again whenever it's resized).
     private func showRescaledDrawing(for slideIndex: Int) {
-        let store = PresentationStore.shared
-        slideCanvas.setDrawing(
-            store.drawing(for: slideIndex),
-            authoredOnCanvasOfSize: store.authoringCanvasSize,
-            aspectRatio: store.slideAspectRatio
-        )
+        slideCanvas.setDrawing(PresentationStore.shared.drawing(for: slideIndex))
     }
 
     private func followStore() {
