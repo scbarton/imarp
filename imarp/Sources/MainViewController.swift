@@ -334,8 +334,11 @@ final class MainViewController: UIViewController {
     private func reloadDeckFromStore() {
         let store = PresentationStore.shared
         // Nothing to draw on until a deck is open (ink on the gray start
-        // screen would belong to no deck and couldn't be saved).
-        slideCanvas.isDrawingEnabled = store.hasDeck
+        // screen would belong to no deck and couldn't be saved). Running on a
+        // Mac (as an iPad app), ink is shown but never drawn: a one-finger
+        // trackpad or mouse drag would leave stray strokes, and the Mac has
+        // no tool picker or undo for them.
+        slideCanvas.isDrawingEnabled = store.hasDeck && !ProcessInfo.processInfo.isiOSAppOnMac
         // Behind the gray start screen, the strip kept clear for the home
         // indicator is gray too, so the gray fills the window out to its
         // rounded corners (black would leave a square-cornered gray box).

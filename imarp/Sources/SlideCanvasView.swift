@@ -1322,6 +1322,9 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.isHidden = annotationsHidden || overviewShowing
         let inkActive = isDrawingEnabled && !annotationsHidden && !overviewShowing && !isDrawingSuspended
         canvasView.drawingGestureRecognizer.isEnabled = inkActive
+        // PencilKit's own switch (iOS 18+): it manages the drawing gesture
+        // itself and can turn it back on (seen on a Mac), so set both.
+        if #available(iOS 18.0, *) { canvasView.isDrawingEnabled = inkActive }
         let takeTouches = inkActive && inkTakesTouches
         if canvasView.isUserInteractionEnabled != takeTouches {
             DebugLog.write("ink", takeTouches ? "ink layer takes all touches (lasso/ruler)" : "ink layer passes fingers to the slide")
