@@ -29,15 +29,41 @@ import CoreGraphics
 /// without ever touching a Mac. A bundle with only `source.html` (no
 /// `source.md`) is also accepted, for decks that genuinely are just static
 /// HTML with no editable source.
+///
+/// A deck can also be a plain Markdown file (`.md`, `.markdown` or `.marp`),
+/// with everything a bundle holds sitting beside it in the same folder:
+///
+///   Lecture 8.md         the Markdown
+///   Lecture 8.html       rendered slides (same rule as source.html)
+///   Lecture 8.ink/       Apple Pencil annotations
+///   theme.css            optional, as in a bundle
+///   assets/              as in a bundle
+///
+/// Reaching the files beside it needs access to the whole folder, which the
+/// presenter grants once per folder (see MainViewController).
 enum MarpBundleLoader {
+    /// File extensions opened as a Markdown deck.
+    static let markdownExtensions: Set<String> = ["md", "markdown", "marp"]
+
     struct Contents {
         let deckHTMLURL: URL
         let deckDirectory: URL
         let slideCount: Int
         let slideAspectRatio: CGFloat
-        /// The `.marpbundle` root — where PresentationStore persists ink
-        /// (`ink/<slideIndex>.drawing`).
-        let bundleURL: URL
+        /// Where PresentationStore saves this deck's ink.
+        let inkDirectory: URL
+        /// For the log: the bundle's or Markdown file's name.
+        let name: String
+    }
+
+    /// The files that make up a deck, wherever it lives.
+    private struct Layout {
+        let markdownURL: URL
+        let htmlURL: URL
+        let themeURL: URL
+        let deckDirectory: URL
+        let inkDirectory: URL
+        let name: String
     }
 
     enum LoadError: Error {
@@ -45,19 +71,44 @@ enum MarpBundleLoader {
         case renderFailed(Error)
     }
 
-    static func load(from bundleURL: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
+    /// Loads a deck: a `.marpbundle`, or a Markdown file (see
+    /// `markdownExtensions`) with its files beside it.
+    static func load(from url: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
+        let layout: Layout
+        if markdownExtensions.contains(url.pathExtension.lowercased()) {
+            let folder = url.deletingLastPathComponent()
+            let name = url.deletingPathExtension().lastPathComponent
+            layout = Layout(
+                markdownURL: url,
+                htmlURL: folder.appendingPathComponent("\(name).html"),
+                themeURL: folder.appendingPathComponent("theme.css"),
+                deckDirectory: folder,
+                inkDirectory: folder.appendingPathComponent("\(name).ink", isDirectory: true),
+                name: url.lastPathComponent
+            )
+        } else {
+            layout = Layout(
+                markdownURL: url.appendingPathComponent("source.md"),
+                htmlURL: url.appendingPathComponent("source.html"),
+                themeURL: url.appendingPathComponent("theme.css"),
+                deckDirectory: url,
+                inkDirectory: url.appendingPathComponent("ink", isDirectory: true),
+                name: url.lastPathComponent
+            )
+        }
+        load(layout, completion: completion)
+    }
+
+    private static func load(_ layout: Layout, completion: @escaping (Result<Contents, Error>) -> Void) {
         let fm = FileManager.default
-        let sourceMDURL = bundleURL.appendingPathComponent("source.md")
-        let sourceHTMLURL = bundleURL.appendingPathComponent("source.html")
+        let hasMarkdown = fm.fileExists(atPath: layout.markdownURL.path)
+        let hasHTML = fm.fileExists(atPath: layout.htmlURL.path)
 
-        let hasMarkdown = fm.fileExists(atPath: sourceMDURL.path)
-        let hasHTML = fm.fileExists(atPath: sourceHTMLURL.path)
-
-        let cachedHTML = hasHTML ? try? String(contentsOf: sourceHTMLURL, encoding: .utf8) : nil
+        let cachedHTML = hasHTML ? try? String(contentsOf: layout.htmlURL, encoding: .utf8) : nil
         if hasMarkdown, cachedHTML == nil
-            || sourceIsNewer(sourceMDURL, than: sourceHTMLURL)
+            || sourceIsNewer(layout.markdownURL, than: layout.htmlURL)
             || !builtWithCurrentShell(cachedHTML ?? "") {
-            renderFromSource(bundleURL: bundleURL, sourceMDURL: sourceMDURL, completion: completion)
+            renderFromSource(layout, completion: completion)
             return
         }
 
@@ -65,21 +116,26 @@ enum MarpBundleLoader {
             completion(.failure(LoadError.missingContent))
             return
         }
-        completion(.success(Contents(
-            deckHTMLURL: sourceHTMLURL,
-            deckDirectory: bundleURL,
-            slideCount: slideCount(in: html),
-            slideAspectRatio: slideAspectRatio(in: html),
-            bundleURL: bundleURL
-        )))
+        completion(.success(contents(layout, html: html)))
     }
 
-    private static func renderFromSource(bundleURL: URL, sourceMDURL: URL, completion: @escaping (Result<Contents, Error>) -> Void) {
-        guard let markdown = try? String(contentsOf: sourceMDURL, encoding: .utf8) else {
+    private static func contents(_ layout: Layout, html: String) -> Contents {
+        Contents(
+            deckHTMLURL: layout.htmlURL,
+            deckDirectory: layout.deckDirectory,
+            slideCount: slideCount(in: html),
+            slideAspectRatio: slideAspectRatio(in: html),
+            inkDirectory: layout.inkDirectory,
+            name: layout.name
+        )
+    }
+
+    private static func renderFromSource(_ layout: Layout, completion: @escaping (Result<Contents, Error>) -> Void) {
+        guard let markdown = try? String(contentsOf: layout.markdownURL, encoding: .utf8) else {
             completion(.failure(LoadError.missingContent))
             return
         }
-        let themeCSS = try? String(contentsOf: bundleURL.appendingPathComponent("theme.css"), encoding: .utf8)
+        let themeCSS = try? String(contentsOf: layout.themeURL, encoding: .utf8)
 
         MarpRenderer.shared.render(markdown: markdown, themeCSS: themeCSS) { result in
             switch result {
@@ -89,16 +145,8 @@ enum MarpBundleLoader {
             case .success(let rendered):
                 do {
                     let assembled = try assemble(html: rendered.html, css: rendered.css)
-                    let sourceHTMLURL = bundleURL.appendingPathComponent("source.html")
-                    try assembled.write(to: sourceHTMLURL, atomically: true, encoding: .utf8)
-
-                    completion(.success(Contents(
-                        deckHTMLURL: sourceHTMLURL,
-                        deckDirectory: bundleURL,
-                        slideCount: slideCount(in: assembled),
-                        slideAspectRatio: slideAspectRatio(in: assembled),
-                        bundleURL: bundleURL
-                    )))
+                    try assembled.write(to: layout.htmlURL, atomically: true, encoding: .utf8)
+                    completion(.success(contents(layout, html: assembled)))
                 } catch {
                     completion(.failure(error))
                 }

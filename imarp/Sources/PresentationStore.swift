@@ -117,13 +117,12 @@ final class PresentationStore {
 
     private var drawings: [Int: PKDrawing] = [:]
 
-    /// The currently open `.marpbundle`'s root, used to persist ink under
-    /// `ink/<slideIndex>.drawing` — kept separate from `source.md`/
-    /// `source.html` so that re-exporting from BBEdit (which only touches
-    /// those two files) never wipes annotations. `nil` for the bundled
-    /// gray start screen shown before any deck is opened, which has no ink;
-    /// ink in-memory only, same as before persistence existed.
-    private(set) var bundleURL: URL?
+    /// Where the open deck's ink is saved, one file per slide index: `ink/`
+    /// inside a `.marpbundle`, or `<name>.ink/` beside a Markdown deck (see
+    /// MarpBundleLoader). Kept apart from the Markdown and the rendered HTML,
+    /// so editing or re-rendering the deck never touches annotations. `nil`
+    /// on the gray start screen, which has no ink.
+    private(set) var inkDirectory: URL?
 
     /// Debounced per-slide save timers, so a fast run of PencilKit's
     /// continuous drawing-changed updates during a single stroke doesn't
@@ -173,7 +172,7 @@ final class PresentationStore {
     }
 
     /// Whether a deck is open (as opposed to the gray start screen).
-    var hasDeck: Bool { bundleURL != nil }
+    var hasDeck: Bool { inkDirectory != nil }
 
     /// The start screen's gray, also used behind it on the iPad (see
     /// MainViewController.reloadDeckFromStore).
@@ -203,14 +202,14 @@ final class PresentationStore {
         )
     }
 
-    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int, slideAspectRatio: CGFloat, bundleURL: URL?) {
+    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int, slideAspectRatio: CGFloat, inkDirectory: URL?, name: String) {
         flushPendingInkSaves()
         deckHTMLURL = htmlURL
         deckDirectory = directory
         self.slideCount = slideCount
         self.slideAspectRatio = slideAspectRatio
-        DebugLog.write("store", "loaded \(bundleURL?.lastPathComponent ?? htmlURL.lastPathComponent): \(slideCount) slides, aspect \(slideAspectRatio)")
-        self.bundleURL = bundleURL
+        DebugLog.write("store", "loaded \(name): \(slideCount) slides, aspect \(slideAspectRatio)")
+        self.inkDirectory = inkDirectory
         currentPosition = .start
         drawings = [:]
         formInputs = [:]
@@ -233,19 +232,18 @@ final class PresentationStore {
     }
 
     private func inkFileURL(for slideIndex: Int) -> URL? {
-        bundleURL?.appendingPathComponent("ink/\(slideIndex).slide.drawing")
+        inkDirectory?.appendingPathComponent("\(slideIndex).slide.drawing")
     }
 
     private func legacyInkFileURL(for slideIndex: Int) -> URL? {
-        bundleURL?.appendingPathComponent("ink/\(slideIndex).drawing")
+        inkDirectory?.appendingPathComponent("\(slideIndex).drawing")
     }
 
     /// Reads `<n>.slide.drawing` (slide space) where there is one, and
     /// otherwise maps an old `<n>.drawing` (iPad canvas points) into slide
     /// space.
     private func loadInkFromDisk() {
-        guard let bundleURL else { return }
-        let inkDirectory = bundleURL.appendingPathComponent("ink", isDirectory: true)
+        guard let inkDirectory else { return }
         guard let files = try? FileManager.default.contentsOfDirectory(at: inkDirectory, includingPropertiesForKeys: nil) else { return }
         var current: [Int: PKDrawing] = [:]
         var legacy: [Int: PKDrawing] = [:]
@@ -270,7 +268,7 @@ final class PresentationStore {
     }
 
     private func scheduleInkSave(for slideIndex: Int) {
-        guard bundleURL != nil else { return }
+        guard inkDirectory != nil else { return }
         pendingInkSaves[slideIndex]?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.saveInk(for: slideIndex)

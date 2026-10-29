@@ -14,10 +14,14 @@ final class MainViewController: UIViewController {
     private var presentButton: UIBarButtonItem?
     private var pointerToggleButton: UIBarButtonItem?
 
-    /// The bundle URL currently holding a `startAccessingSecurityScopedResource`
-    /// claim (see `UIDocumentPickerDelegate` below), so it can be released
-    /// when a different deck is opened.
-    private var accessedBundleURL: URL?
+    /// URLs currently holding a `startAccessingSecurityScopedResource` claim
+    /// for the open deck (see `openDeck(at:accessing:)`), so they can be
+    /// released when a different deck is opened.
+    private var accessedURLs: [URL] = []
+
+    /// A Markdown deck waiting for the presenter to allow access to its
+    /// folder (see askForFolder(of:)).
+    private var markdownAwaitingFolder: URL?
 
     private lazy var pencilPointer = UILongPressGestureRecognizer(
         target: self, action: #selector(handlePointerGesture(_:))
@@ -487,15 +491,85 @@ final class MainViewController: UIViewController {
     }
 
     @objc private func openTapped() {
-        guard let bundleType = UTType(filenameExtension: "marpbundle") else { return }
+        // A .marpbundle, or a Markdown deck (see MarpBundleLoader).
+        let types = (["marpbundle"] + MarpBundleLoader.markdownExtensions.sorted())
+            .compactMap { UTType(filenameExtension: $0) }
         // asCopy: false — opening in place (rather than a throwaway copy in
         // the app's Inbox) is what makes the rendered-HTML cache and ink
-        // persistence actually stick: both write back into the bundle
+        // persistence actually stick: both write back beside the deck
         // MarpBundleLoader/PresentationStore were handed, so if that were a
         // copy, every write would be discarded the next time this deck opens.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [bundleType], asCopy: false)
+        markdownAwaitingFolder = nil
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
         picker.delegate = self
         present(picker, animated: true)
+    }
+
+    /// Picking a Markdown file only grants access to that one file, not the
+    /// theme, assets, rendered HTML and ink beside it. So the first time a
+    /// deck is opened from a folder, the presenter is asked to allow that
+    /// folder (the folder picker opens on it); it's remembered from then on
+    /// (see GrantedFolders), for every deck in it or below it.
+    private func askForFolder(of markdownURL: URL) {
+        let folder = markdownURL.deletingLastPathComponent()
+        let alert = UIAlertController(
+            title: "Allow Access to “\(folder.lastPathComponent)”",
+            message: "To show \(markdownURL.lastPathComponent) with its theme and assets, and to save its slides and ink beside it, iMarp needs access to the folder it's in. Tap Open in the next screen. This is only asked once per folder.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Continue", style: .default) { [weak self] _ in
+            guard let self else { return }
+            markdownAwaitingFolder = markdownURL
+            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+            picker.directoryURL = folder
+            picker.delegate = self
+            present(picker, animated: true)
+        })
+        present(alert, animated: true)
+    }
+
+    private func showOpenError(_ message: String) {
+        let alert = UIAlertController(title: "Couldn't Open Deck", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
+    /// Loads a deck, keeping security-scoped access to `accessing` (the
+    /// deck, and for a Markdown deck its folder) while it stays open. Only
+    /// one deck is open at a time, so the previous one's access is released.
+    private func openDeck(at url: URL, accessing: [URL]) {
+        accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+        accessedURLs = accessing
+
+        // Rendering from Markdown happens on-device (a few JS round-trips
+        // through MarpRenderer), so this isn't instant — show something
+        // rather than a frozen toolbar.
+        let spinner = UIActivityIndicatorView(style: .large)
+        spinner.center = view.center
+        spinner.startAnimating()
+        view.addSubview(spinner)
+
+        MarpBundleLoader.load(from: url) { [weak self] result in
+            guard let self else { return }
+            spinner.removeFromSuperview()
+            switch result {
+            case .success(let contents):
+                PresentationStore.shared.loadDeck(
+                    htmlURL: contents.deckHTMLURL,
+                    directory: contents.deckDirectory,
+                    slideCount: contents.slideCount,
+                    slideAspectRatio: contents.slideAspectRatio,
+                    inkDirectory: contents.inkDirectory,
+                    name: contents.name
+                )
+            case .failure(let error):
+                DebugLog.write("ipad", "couldn't open \(url.lastPathComponent): \(error)")
+                accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+                accessedURLs = []
+                showOpenError("\(url.lastPathComponent) couldn't be read as a Marp deck: \(error)")
+            }
+        }
     }
 
     @objc private func exportTapped() {
@@ -600,56 +674,80 @@ extension MainViewController: UIDocumentPickerDelegate {
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         DispatchQueue.main.async { [weak self] in self?.restoreToolPicker() }
-        guard let bundleURL = urls.first else { return }
+        guard let url = urls.first else { return }
+
+        // The folder picker from askForFolder(of:).
+        if let markdownURL = markdownAwaitingFolder {
+            markdownAwaitingFolder = nil
+            guard url.startAccessingSecurityScopedResource() else {
+                showOpenError("iOS denied access to \(url.lastPathComponent).")
+                return
+            }
+            guard GrantedFolders.isInside(markdownURL, folder: url) else {
+                url.stopAccessingSecurityScopedResource()
+                showOpenError("\(markdownURL.lastPathComponent) isn't in “\(url.lastPathComponent)”. Choose the folder the deck is in (or one containing it).")
+                return
+            }
+            GrantedFolders.remember(url)
+            DebugLog.write("ipad", "folder allowed: \(url.path)")
+            let fileAccess = markdownURL.startAccessingSecurityScopedResource()
+            openDeck(at: markdownURL, accessing: [url] + (fileAccess ? [markdownURL] : []))
+            return
+        }
 
         // Opening in place (see openTapped) means this URL is
         // security-scoped: reads/writes need startAccessingSecurityScopedResource
-        // for the duration this deck stays open. Only one deck is open at a
-        // time, so the previous one's access is released here too.
-        guard bundleURL.startAccessingSecurityScopedResource() else {
-            let alert = UIAlertController(
-                title: "Couldn't Open Deck",
-                message: "iOS denied access to \(bundleURL.lastPathComponent).",
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
+        // for as long as the deck stays open.
+        guard url.startAccessingSecurityScopedResource() else {
+            showOpenError("iOS denied access to \(url.lastPathComponent).")
             return
         }
-        accessedBundleURL?.stopAccessingSecurityScopedResource()
-        accessedBundleURL = bundleURL
-
-        // Opening a source-only bundle renders on-device (a few JS
-        // round-trips through MarpRenderer), so this isn't instant —
-        // show something rather than a frozen toolbar.
-        let spinner = UIActivityIndicatorView(style: .large)
-        spinner.center = view.center
-        spinner.startAnimating()
-        view.addSubview(spinner)
-
-        MarpBundleLoader.load(from: bundleURL) { [weak self] result in
-            guard let self else { return }
-            spinner.removeFromSuperview()
-            switch result {
-            case .success(let contents):
-                PresentationStore.shared.loadDeck(
-                    htmlURL: contents.deckHTMLURL,
-                    directory: contents.deckDirectory,
-                    slideCount: contents.slideCount,
-                    slideAspectRatio: contents.slideAspectRatio,
-                    bundleURL: contents.bundleURL
-                )
-            case .failure(let error):
-                accessedBundleURL?.stopAccessingSecurityScopedResource()
-                accessedBundleURL = nil
-                let alert = UIAlertController(
-                    title: "Couldn't Open Deck",
-                    message: "\(bundleURL.lastPathComponent) doesn't look like a valid .marpbundle: \(error)",
-                    preferredStyle: .alert
-                )
-                alert.addAction(UIAlertAction(title: "OK", style: .default))
-                present(alert, animated: true)
+        if MarpBundleLoader.markdownExtensions.contains(url.pathExtension.lowercased()) {
+            guard let folder = GrantedFolders.accessFolder(containing: url) else {
+                url.stopAccessingSecurityScopedResource()
+                askForFolder(of: url)
+                return
             }
+            openDeck(at: url, accessing: [folder, url])
+        } else {
+            openDeck(at: url, accessing: [url])
         }
+    }
+}
+
+/// Folders the presenter has allowed iMarp to use (for Markdown decks: the
+/// theme, assets, rendered HTML and ink beside the deck), remembered across
+/// launches as bookmarks. A deck anywhere inside an allowed folder, however
+/// deep, opens without asking again.
+enum GrantedFolders {
+    private static let defaultsKey = "grantedFolderBookmarks"
+
+    static func remember(_ folder: URL) {
+        guard let bookmark = try? folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return }
+        var bookmarks = UserDefaults.standard.array(forKey: defaultsKey) as? [Data] ?? []
+        bookmarks.append(bookmark)
+        UserDefaults.standard.set(bookmarks, forKey: defaultsKey)
+    }
+
+    /// An allowed folder containing `url`, with its security-scoped access
+    /// already started (the caller stops it when done), or nil.
+    static func accessFolder(containing url: URL) -> URL? {
+        let bookmarks = UserDefaults.standard.array(forKey: defaultsKey) as? [Data] ?? []
+        for bookmark in bookmarks {
+            var stale = false
+            guard let folder = try? URL(resolvingBookmarkData: bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+                  isInside(url, folder: folder),
+                  folder.startAccessingSecurityScopedResource()
+            else { continue }
+            if stale { remember(folder) }
+            return folder
+        }
+        return nil
+    }
+
+    static func isInside(_ url: URL, folder: URL) -> Bool {
+        let folderPath = folder.standardizedFileURL.resolvingSymlinksInPath().path
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return path.hasPrefix(folderPath.hasSuffix("/") ? folderPath : folderPath + "/")
     }
 }
