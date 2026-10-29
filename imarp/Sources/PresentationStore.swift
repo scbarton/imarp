@@ -202,15 +202,22 @@ final class PresentationStore {
         )
     }
 
-    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int, slideAspectRatio: CGFloat, inkDirectory: URL?, name: String) {
+    /// `keepPosition`: a live reload of the same deck (see DeckWatcher),
+    /// which stays on the current slide (or the last one, if the deck got
+    /// shorter) instead of starting over.
+    func loadDeck(htmlURL: URL, directory: URL, slideCount: Int, slideAspectRatio: CGFloat, inkDirectory: URL?, name: String, keepPosition: Bool = false) {
         flushPendingInkSaves()
         deckHTMLURL = htmlURL
         deckDirectory = directory
         self.slideCount = slideCount
         self.slideAspectRatio = slideAspectRatio
-        DebugLog.write("store", "loaded \(name): \(slideCount) slides, aspect \(slideAspectRatio)")
+        DebugLog.write("store", "\(keepPosition ? "reloaded" : "loaded") \(name): \(slideCount) slides, aspect \(slideAspectRatio)")
         self.inkDirectory = inkDirectory
-        currentPosition = .start
+        if keepPosition {
+            currentPosition = SlidePosition(index: min(currentPosition.index, max(slideCount - 1, 0)), fragment: currentPosition.fragment)
+        } else {
+            currentPosition = .start
+        }
         drawings = [:]
         formInputs = [:]
         loadInkFromDisk()

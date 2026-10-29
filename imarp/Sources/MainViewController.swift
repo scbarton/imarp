@@ -19,6 +19,9 @@ final class MainViewController: UIViewController {
     /// released when a different deck is opened.
     private var accessedURLs: [URL] = []
 
+    /// Watches the open deck's Markdown and theme for live reload.
+    private var deckWatcher: DeckWatcher?
+
     /// A Markdown deck waiting for the presenter to allow access to its
     /// folder (see askForFolder(of:)).
     private var markdownAwaitingFolder: URL?
@@ -536,6 +539,40 @@ final class MainViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    /// Live reload: when the open deck's Markdown or theme changes, it's
+    /// re-rendered and both screens reload in place, on the same slide, with
+    /// ink saved first and shown again after.
+    private func watchForChanges(to url: URL, files: [URL]) {
+        guard !files.isEmpty else { return }
+        deckWatcher = DeckWatcher(files: files) { [weak self] in self?.reloadChangedDeck(at: url) }
+    }
+
+    private var isReloading = false
+
+    private func reloadChangedDeck(at url: URL) {
+        guard !isReloading else { return }
+        isReloading = true
+        MarpBundleLoader.load(from: url) { [weak self] result in
+            guard let self else { return }
+            isReloading = false
+            switch result {
+            case .success(let contents):
+                PresentationStore.shared.loadDeck(
+                    htmlURL: contents.deckHTMLURL,
+                    directory: contents.deckDirectory,
+                    slideCount: contents.slideCount,
+                    slideAspectRatio: contents.slideAspectRatio,
+                    inkDirectory: contents.inkDirectory,
+                    name: contents.name,
+                    keepPosition: true
+                )
+            case .failure(let error):
+                // Keep showing the last good version (e.g. a half-saved file).
+                DebugLog.write("ipad", "live reload of \(url.lastPathComponent) failed: \(error)")
+            }
+        }
+    }
+
     private func showOpenError(_ message: String) {
         let alert = UIAlertController(title: "Couldn't Open Deck", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
@@ -546,6 +583,8 @@ final class MainViewController: UIViewController {
     /// deck, and for a Markdown deck its folder) while it stays open. Only
     /// one deck is open at a time, so the previous one's access is released.
     private func openDeck(at url: URL, accessing: [URL]) {
+        deckWatcher?.stop()
+        deckWatcher = nil
         accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         accessedURLs = accessing
 
@@ -570,6 +609,7 @@ final class MainViewController: UIViewController {
                     inkDirectory: contents.inkDirectory,
                     name: contents.name
                 )
+                watchForChanges(to: url, files: contents.sourceFiles)
             case .failure(let error):
                 DebugLog.write("ipad", "couldn't open \(url.lastPathComponent): \(error)")
                 accessedURLs.forEach { $0.stopAccessingSecurityScopedResource() }

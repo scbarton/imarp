@@ -54,6 +54,10 @@ enum MarpBundleLoader {
         let inkDirectory: URL
         /// For the log: the bundle's or Markdown file's name.
         let name: String
+        /// The files the slides are rendered from (the Markdown and
+        /// theme.css), watched for live reload; empty for a deck that's
+        /// HTML only.
+        let sourceFiles: [URL]
     }
 
     /// The files that make up a deck, wherever it lives.
@@ -223,7 +227,8 @@ enum MarpBundleLoader {
             slideCount: slideCount(in: html),
             slideAspectRatio: slideAspectRatio(in: html),
             inkDirectory: layout.inkDirectory,
-            name: layout.name
+            name: layout.name,
+            sourceFiles: FileManager.default.fileExists(atPath: layout.markdownURL.path) ? [layout.markdownURL, layout.themeURL] : []
         )
     }
 
@@ -332,5 +337,58 @@ enum MarpBundleLoader {
             return true
         }
         return sourceDate > renderedDate
+    }
+}
+
+/// Live reload: while a deck is open, checks its source files (the Markdown
+/// and theme.css) every couple of seconds and calls `onChange` when one has
+/// changed, whether it was saved on this device or the change came in
+/// through iCloud. A newer version iCloud knows about but hasn't downloaded
+/// yet is asked for first, and reported once it's here. Polling rather than
+/// file presenters: it's simple, and it sees iCloud updates the same way as
+/// local saves.
+final class DeckWatcher {
+    private let files: [URL]
+    private var lastSeen: [URL: Date] = [:]
+    private var timer: Timer?
+    private let onChange: () -> Void
+
+    init(files: [URL], onChange: @escaping () -> Void) {
+        self.files = files
+        self.onChange = onChange
+        for file in files { lastSeen[file] = Self.modificationDate(of: file) }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.check() }
+    }
+
+    deinit { timer?.invalidate() }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func check() {
+        var changed = false
+        for var file in files {
+            file.removeAllCachedResourceValues()
+            let values = try? file.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+            if values?.isUbiquitousItem == true, let status = values?.ubiquitousItemDownloadingStatus, status != .current {
+                // iCloud has a newer version (or none here yet): fetch it,
+                // and pick it up on a later check once it's down.
+                try? FileManager.default.startDownloadingUbiquitousItem(at: file)
+                continue
+            }
+            let date = Self.modificationDate(of: file)
+            if date != lastSeen[file] {
+                lastSeen[file] = date
+                changed = true
+                DebugLog.write("store", "live reload: \(file.lastPathComponent) changed")
+            }
+        }
+        if changed { onChange() }
+    }
+
+    private static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 }
