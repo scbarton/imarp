@@ -179,6 +179,13 @@ final class MainViewController: UIViewController {
         // otherwise claim the touch first.
         pencilPointer.delegate = self
         slideCanvas.addGestureRecognizer(pencilPointer)
+        // With pointer mode on, the Pencil must never draw or erase. Switching
+        // PencilKit's drawing off doesn't stick (it turns its own gesture
+        // back on), so drawing may only start once the pointer gesture has
+        // failed: with pointer mode on it starts the instant the tip lands,
+        // so drawing never does; with it off it's disabled, so drawing starts
+        // straight away as usual.
+        slideCanvas.canvasView.drawingGestureRecognizer.require(toFail: pencilPointer)
 
         // On iPads that support Apple Pencil hover (M2 iPad Pro and later),
         // holding the tip just above the screen moves the dot too. Hover

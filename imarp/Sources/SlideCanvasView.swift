@@ -1397,6 +1397,52 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         canvasView.drawingGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
         contentView.pageScrollView.pinchGestureRecognizer?.addTarget(self, action: #selector(logGestureState(_:)))
         contentView.pageScrollView.panGestureRecognizer.addTarget(self, action: #selector(logGestureState(_:)))
+        // The Pencil never pans or zooms the page (fingers do). Telling the
+        // page's scroll view to ignore it doesn't stick (UIScrollView resets
+        // its pan's touch types), so instead every Pencil touch is claimed by
+        // this Pencil-only gesture, which starts the instant the tip lands,
+        // and the page's pan and pinch may only start once it has failed.
+        // Fingers never reach it, so finger panning is unaffected.
+        pencilClaim.minimumPressDuration = 0
+        pencilClaim.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pencilClaim.cancelsTouchesInView = false
+        pencilClaim.delaysTouchesBegan = false
+        pencilClaim.delaysTouchesEnded = false
+        pencilClaim.delegate = self
+        addGestureRecognizer(pencilClaim)
+        keepPageGesturesFromPencil()
+        contentView.onTransitionActiveChanged = { [weak self] active in
+            self?.setInkSuppressedForTransition(active)
+        }
+        contentView.onOverviewChanged = { [weak self] open in
+            guard let self else { return }
+            overviewShowing = open
+            onOverviewChanged?(open)
+        }
+        // Pinch-zoom happens natively in the page; the ink follows it.
+        contentView.onPageZoomChanged = { [weak self] scale, offset in
+            self?.followPageZoom(scale: scale, offset: offset)
+        }
+
+        addSubview(contentView)
+        addSubview(canvasView)
+        // Above the ink layer, so the pointer stays visible even while
+        // drawing is on screen.
+        addSubview(pointerDotView)
+        NSLayoutConstraint.activate([
+            contentView.topAnchor.constraint(equalTo: topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            canvasView.topAnchor.constraint(equalTo: topAnchor),
+            canvasView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            canvasView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            canvasView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pointerDotView.topAnchor.constraint(equalTo: topAnchor),
+            pointerDotView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pointerDotView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pointerDotView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -1699,8 +1745,24 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         zoomDidChange()
     }
 
+    /// Claims every Pencil touch over the slide; see init.
+    private let pencilClaim = UILongPressGestureRecognizer(target: nil, action: nil)
+    private var pageGesturesKeptFromPencil = Set<ObjectIdentifier>()
+
+    /// The page's pinch gesture only exists once WebKit enables zooming, so
+    /// this is repeated at layout until both pan and pinch are covered.
+    private func keepPageGesturesFromPencil() {
+        let scrollView = contentView.pageScrollView
+        for recognizer in [scrollView.panGestureRecognizer, scrollView.pinchGestureRecognizer].compactMap({ $0 })
+        where !pageGesturesKeptFromPencil.contains(ObjectIdentifier(recognizer)) {
+            recognizer.require(toFail: pencilClaim)
+            pageGesturesKeptFromPencil.insert(ObjectIdentifier(recognizer))
+        }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        keepPageGesturesFromPencil()
         // At normal size the canvas's content is exactly its bounds (no
         // scrolling, strokes in the view's own coordinates); zooming needs a
         // content size to scale from.
@@ -1720,3 +1782,10 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
     }
 }
 
+extension SlideCanvasView: UIGestureRecognizerDelegate {
+    /// The Pencil claim (see init) only exists to hold off the page's pan
+    /// and pinch; drawing and the laser pointer go on alongside it.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === pencilClaim
+    }
+}
