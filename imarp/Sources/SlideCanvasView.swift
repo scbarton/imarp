@@ -1380,7 +1380,19 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 extension SlideContentView: WKNavigationDelegate {
     /// Tapped links: within the deck (`#3`) they move it as usual; anything
     /// else opens in its own app (Safari...) rather than replacing the deck.
+    /// A web link tapped inside a widget (an iframe) opens there too: most
+    /// sites refuse to be shown inside another page, which left the widget
+    /// blank. Links between a widget's own local pages stay in the widget.
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.navigationType == .linkActivated,
+           let frame = navigationAction.targetFrame, !frame.isMainFrame,
+           let url = navigationAction.request.url,
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            log("opening link \(url) from a widget outside the deck")
+            UIApplication.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
         guard navigationAction.navigationType == .linkActivated,
               navigationAction.targetFrame?.isMainFrame ?? true,
               let url = navigationAction.request.url
