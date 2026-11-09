@@ -506,19 +506,74 @@ final class SlideContentView: UIView {
             ['input', 'change', 'click'].forEach(function (type) {
                 document.addEventListener(type, report, true);
             });
+            // Plotly's own sliders and menus (from a Plotly figure exported
+            // to HTML) are drawn inside the plot, not HTML controls, so the
+            // above never sees them. Plotly reports each change the
+            // presenter makes (interaction, not an animation); relay the
+            // slider's or menu's new position, and the external display
+            // applies the same step. Plots can appear any time after load,
+            // so they're looked for for a while.
+            function hookPlotly() {
+                document.querySelectorAll('.js-plotly-plot').forEach(function (plot) {
+                    if (plot.__imarpHooked || typeof plot.on !== 'function') { return; }
+                    plot.__imarpHooked = true;
+                    plot.on('plotly_sliderchange', function (event) {
+                        if (!event || !event.interaction || !event.slider) { return; }
+                        var path = elementPath(plot);
+                        if (path === null) { return; }
+                        relay({ kind: 'plotly-slider', frames: [], path: path,
+                                control: event.slider._index, active: event.slider.steps.indexOf(event.step) });
+                    });
+                    plot.on('plotly_buttonclicked', function (event) {
+                        if (!event || !event.menu) { return; }
+                        var path = elementPath(plot);
+                        if (path === null) { return; }
+                        relay({ kind: 'plotly-menu', frames: [], path: path,
+                                control: event.menu._index, active: event.active });
+                    });
+                });
+            }
+            var plotlyLooks = 0;
+            var plotlyTimer = setInterval(function () {
+                hookPlotly();
+                if (++plotlyLooks > 30) { clearInterval(plotlyTimer); }
+            }, 1000);
+            window.addEventListener('load', hookPlotly);
+            // Applies a relayed Plotly slider or menu change: moves the
+            // control to the same position and runs that step's command
+            // (update, restyle, relayout or animate), as Plotly would.
+            function applyPlotly(plot, change) {
+                var Plotly = window.Plotly;
+                var layout = plot._fullLayout;
+                if (!Plotly || !layout) { return; }
+                var isSlider = change.kind === 'plotly-slider';
+                var control = (isSlider ? layout.sliders : layout.updatemenus || [])[change.control];
+                var item = control && (isSlider ? control.steps : control.buttons)[change.active];
+                if (!item) { return; }
+                var update = {};
+                update[(isSlider ? 'sliders[' : 'updatemenus[') + change.control + '].active'] = change.active;
+                Plotly.relayout(plot, update).then(function () {
+                    var command = Plotly[item.method];
+                    if (item.method && item.method !== 'skip' && typeof command === 'function') {
+                        command.apply(Plotly, [plot].concat(item.args || []));
+                    }
+                });
+            }
             function apply(change) {
                 if (change.frames.length > 0) {
                     var frame = frames()[change.frames[0]];
                     if (frame && frame.contentWindow) {
                         frame.contentWindow.postMessage({ imarpInputApply: {
                             kind: change.kind, frames: change.frames.slice(1), path: change.path,
-                            value: change.value, checked: change.checked } }, '*');
+                            value: change.value, checked: change.checked,
+                            control: change.control, active: change.active } }, '*');
                     }
                     return;
                 }
                 var element = findElement(change.path);
                 if (!element) { return; }
                 if (change.kind === 'click') { element.click(); return; }
+                if (change.kind === 'plotly-slider' || change.kind === 'plotly-menu') { applyPlotly(element, change); return; }
                 if (element.type === 'checkbox' || element.type === 'radio') {
                     element.checked = change.checked;
                 } else {
