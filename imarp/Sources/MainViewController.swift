@@ -466,6 +466,7 @@ final class MainViewController: UIViewController {
         let enabled = PresentationStore.shared.pointerEnabled
         pencilPointer.isEnabled = enabled
         slideCanvas.isDrawingSuspended = enabled
+        slideCanvas.contentView.blocksPencilInFrames = enabled
         DebugLog.write("ipad", "pointer mode \(enabled ? "on" : "off")")
     }
 

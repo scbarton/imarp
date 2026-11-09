@@ -182,6 +182,36 @@ final class SlideContentView: UIView {
                 }
                 meta.setAttribute('content', 'width=' + width + ', height=' + height + ', initial-scale=1, minimum-scale=1, maximum-scale=5, user-scalable=yes');
             };
+            // Where the current slide's iframes are on screen, in the view's
+            // points, so a Pencil touch on one can work its controls instead
+            // of drawing (see SlideCanvasView.pencilOnFrame). Sent whenever
+            // it changes: slide changes, zoom, pan, resize.
+            var frameRectsSent = '';
+            function reportFrameRects() {
+                var vv = window.visualViewport;
+                var scale = vv ? vv.scale : 1, left = vv ? vv.offsetLeft : 0, top = vv ? vv.offsetTop : 0;
+                var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
+                var rects = [];
+                if (active && !window.__imarpOverviewOpen) {
+                    active.querySelectorAll('iframe').forEach(function (frame) {
+                        var r = frame.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            rects.push([(r.left - left) * scale, (r.top - top) * scale, r.width * scale, r.height * scale].map(Math.round));
+                        }
+                    });
+                }
+                var json = JSON.stringify(rects);
+                if (json !== frameRectsSent) {
+                    frameRectsSent = json;
+                    post('imarpFrames', rects);
+                }
+            }
+            setInterval(reportFrameRects, 400);
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener('resize', reportFrameRects);
+                window.visualViewport.addEventListener('scroll', reportFrameRects);
+            }
+            window.addEventListener('resize', reportFrameRects);
             window.__imarpGeometry = function () {
                 var svg = document.querySelector('svg[data-marpit-svg]');
                 if (!svg) { return [window.innerWidth, window.innerHeight]; }
@@ -487,7 +517,9 @@ final class SlideContentView: UIView {
                 }
             }
             function report(event) {
-                if (!event.isTrusted) { return; }
+                // A Pencil tap's click (see activateForPen) is the presenter's
+                // own, though not marked trusted.
+                if (!event.isTrusted && !penActivating) { return; }
                 var element = event.target;
                 var change;
                 if (event.type === 'click') {
@@ -608,6 +640,83 @@ final class SlideContentView: UIView {
             // (__imarpZoomed, set by the app) down to every frame.
             var zoomed = false;
             var zoomStyle = null;
+            // In pointer mode the Pencil only moves the dot, so widgets keep
+            // its touches away from their controls (__imarpPencilBlocked, set
+            // by the app; passed down like the zoom state). Otherwise the
+            // Pencil works a widget's controls like a finger.
+            var pencilBlocked = false;
+            function blockPencil(event) {
+                if (!pencilBlocked) { return; }
+                var stylus = event.pointerType === 'pen' ||
+                    Array.prototype.some.call(event.changedTouches || [], function (t) { return t.touchType === 'stylus'; });
+                if (!stylus) { return; }
+                event.stopPropagation();
+                if (event.cancelable) { event.preventDefault(); }
+            }
+            if (!isTop) {
+                ['touchstart', 'touchmove', 'touchend', 'pointerdown', 'pointermove', 'pointerup'].forEach(function (type) {
+                    window.addEventListener(type, blockPencil, { capture: true, passive: false });
+                });
+            }
+            // A Pencil tap on a widget's control: WebKit delivers the touch
+            // (so dragging a slider works) but never turns a Pencil tap into
+            // a click, so the widget page does it. A tap is under 10 points of
+            // movement and 0.6 s. Any real click WebKit might still send for
+            // the same tap is dropped, so nothing happens twice.
+            var penDown = null;
+            var penActivating = false;
+            var penActivated = null;
+            function activateForPen(target, x, y) {
+                var control = target.closest ? target.closest('a[href], button, input, select, textarea, label, summary, [onclick], [role=button]') : null;
+                var element = control || target;
+                penActivating = true;
+                try {
+                    var tag = element.tagName;
+                    var type = (element.type || '').toLowerCase();
+                    if (tag === 'SELECT') {
+                        element.focus();
+                        if (typeof element.showPicker === 'function') { try { element.showPicker(); } catch (e) {} }
+                    } else if (tag === 'TEXTAREA' || (tag === 'INPUT' && !/^(checkbox|radio|button|submit|reset|range|color|file|image)$/.test(type))) {
+                        element.focus();
+                    } else if (tag === 'INPUT' && type === 'range') {
+                        // Dragged, not tapped; WebKit handles that itself.
+                    } else if (control) {
+                        element.click();
+                    } else {
+                        element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+                    }
+                } finally {
+                    penActivating = false;
+                }
+                penActivated = { element: element, time: Date.now() };
+            }
+            if (!isTop) {
+                window.addEventListener('pointerdown', function (event) {
+                    if (event.pointerType !== 'pen' || pencilBlocked) { return; }
+                    penDown = { x: event.clientX, y: event.clientY, time: Date.now(), target: event.target };
+                }, true);
+                window.addEventListener('pointerup', function (event) {
+                    if (event.pointerType !== 'pen' || !penDown || pencilBlocked) { penDown = null; return; }
+                    var down = penDown;
+                    penDown = null;
+                    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 10 || Date.now() - down.time > 600) { return; }
+                    activateForPen(down.target, event.clientX, event.clientY);
+                }, true);
+                window.addEventListener('pointercancel', function () { penDown = null; }, true);
+                window.addEventListener('click', function (event) {
+                    if (!event.isTrusted || !penActivated || Date.now() - penActivated.time > 500) { return; }
+                    if (penActivated.element === event.target || (penActivated.element.contains && penActivated.element.contains(event.target))) {
+                        event.stopPropagation();
+                        event.preventDefault();
+                    }
+                }, true);
+            }
+            function setPencilBlocked(value) {
+                pencilBlocked = !!value;
+                frames().forEach(function (frame) {
+                    if (frame.contentWindow) { frame.contentWindow.postMessage({ imarpPencilBlocked: pencilBlocked }, '*'); }
+                });
+            }
             function isControl(element) {
                 return !!(element && element.closest && element.closest('input, select, textarea, button, label, a[href], summary'));
             }
@@ -640,13 +749,17 @@ final class SlideContentView: UIView {
                 if (!data || typeof data !== 'object') { return; }
                 if (typeof data.imarpZoomed === 'boolean' && !isTop) {
                     setZoomed(data.imarpZoomed);
+                } else if (typeof data.imarpPencilBlocked === 'boolean' && !isTop) {
+                    setPencilBlocked(data.imarpPencilBlocked);
                 } else if (data.imarpZoomQuery && event.source) {
-                    // A frame that loaded while zoomed asks for the state.
+                    // A frame that loaded asks for the current states.
                     event.source.postMessage({ imarpZoomed: zoomed }, '*');
+                    event.source.postMessage({ imarpPencilBlocked: pencilBlocked }, '*');
                 }
             });
             if (isTop) {
                 window.__imarpSetZoomed = setZoomed;
+                window.__imarpSetPencilBlocked = setPencilBlocked;
             } else {
                 window.parent.postMessage({ imarpZoomQuery: true }, '*');
             }
@@ -696,6 +809,7 @@ final class SlideContentView: UIView {
         let messageProxy = WeakScriptMessageHandler()
         configuration.userContentController.add(messageProxy, name: "imarpInput")
         configuration.userContentController.add(messageProxy, name: "imarpLog")
+        configuration.userContentController.add(messageProxy, name: "imarpFrames")
         configuration.userContentController.add(messageProxy, name: "imarpPosition")
         configuration.userContentController.add(messageProxy, name: "imarpTransition")
         configuration.userContentController.add(messageProxy, name: "imarpOverview")
@@ -888,11 +1002,18 @@ final class SlideContentView: UIView {
     /// that delivers touches to the page) is set to ignore the Pencil.
     /// WebKit adds recognizers as it goes, so this is re-applied after
     /// loads and layout.
+    ///
+    /// WebKit's own gestures (WK...) are the exception: they deliver touches
+    /// and taps to the page, and the Pencil needs them to work a widget's
+    /// controls inside an iframe (see SlideCanvasView.pencilOnFrame). Outside
+    /// iframes the slideshow page's own script blocks Pencil touches, and the
+    /// page's pan and pinch wait out SlideCanvasView's Pencil claim.
     private func keepPencilOffPage() {
         let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
         var changed: [String] = []
         func apply(to view: UIView) {
-            for recognizer in view.gestureRecognizers ?? [] where recognizer.allowedTouchTypes.contains(pencil) {
+            for recognizer in view.gestureRecognizers ?? []
+            where recognizer.allowedTouchTypes.contains(pencil) && !String(describing: type(of: recognizer)).hasPrefix("WK") {
                 recognizer.allowedTouchTypes = recognizer.allowedTouchTypes.filter { $0 != pencil }
                 changed.append(String(describing: type(of: recognizer)))
             }
@@ -1082,6 +1203,31 @@ final class SlideContentView: UIView {
         webView.evaluateJavaScript("window.__imarpApplyInput && window.__imarpApplyInput(\(json))")
     }
 
+    /// Where the current slide's iframes are, in this view's points (see
+    /// reportFrameRects in the deck hook).
+    private var frameRects: [CGRect] = []
+
+    fileprivate func frameRectsReported(_ rects: [[Double]]) {
+        frameRects = rects.filter { $0.count == 4 }.map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) }
+    }
+
+    /// Whether `point` (in this view's coordinates) is over one of the
+    /// current slide's iframes.
+    func isOverFrame(_ point: CGPoint) -> Bool {
+        frameRects.contains { $0.contains(point) }
+    }
+
+    /// Pointer mode: the Pencil only moves the dot, so widgets keep it away
+    /// from their controls (see blockPencil in formInputScript).
+    var blocksPencilInFrames = false {
+        didSet { applyPencilBlocking() }
+    }
+
+    private func applyPencilBlocking() {
+        guard didFinishInitialLoad else { return }
+        webView.evaluateJavaScript("window.__imarpSetPencilBlocked && window.__imarpSetPencilBlocked(\(blocksPencilInFrames));")
+    }
+
     fileprivate func pageLogged(_ text: String) {
         log("page: \(text)")
     }
@@ -1199,6 +1345,10 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
             if let info = message.body as? [String: Any] { target?.mediaReported(info) }
             return
         }
+        if message.name == "imarpFrames" {
+            if let rects = message.body as? [[Double]] { target?.frameRectsReported(rects) }
+            return
+        }
         if message.name == "imarpLog" {
             if let text = message.body as? String { target?.pageLogged(text) }
             return
@@ -1265,6 +1415,7 @@ extension SlideContentView: WKNavigationDelegate {
         didFinishInitialLoad = true
         updateViewport()
         keepPencilOffPage()
+        applyPencilBlocking()
         // A (re)loaded page starts out thinking it isn't zoomed.
         pageToldZoomed = false
         tellPageIfZoomed(webView.scrollView.zoomScale > 1.01)
@@ -1466,6 +1617,20 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
         pencilClaim.delegate = self
         addGestureRecognizer(pencilClaim)
         keepPageGesturesFromPencil()
+        // A Pencil touch that lands on one of the slide's iframes (a widget,
+        // a notebook page) works its controls, which are small and suit the
+        // Pencil's precision, instead of drawing: this Pencil-only gesture
+        // starts at once for such touches, and drawing has to wait for it to
+        // fail. Elsewhere it never receives the touch, so drawing is as usual.
+        pencilOnFrame.minimumPressDuration = 0
+        pencilOnFrame.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pencilOnFrame.cancelsTouchesInView = false
+        pencilOnFrame.delaysTouchesBegan = false
+        pencilOnFrame.delaysTouchesEnded = false
+        pencilOnFrame.delegate = self
+        pencilOnFrame.addTarget(self, action: #selector(logGestureState(_:)))
+        addGestureRecognizer(pencilOnFrame)
+        canvasView.drawingGestureRecognizer.require(toFail: pencilOnFrame)
         contentView.onTransitionActiveChanged = { [weak self] active in
             self?.setInkSuppressedForTransition(active)
         }
@@ -1754,6 +1919,8 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
             name = "page pinch"
         } else if recognizer === contentView.pageScrollView.panGestureRecognizer {
             name = "page pan"
+        } else if recognizer === pencilOnFrame {
+            name = "Pencil on a widget (no drawing)"
         } else {
             name = String(describing: type(of: recognizer))
         }
@@ -1802,6 +1969,8 @@ final class SlideCanvasView: UIView, PKCanvasViewDelegate {
 
     /// Claims every Pencil touch over the slide; see init.
     private let pencilClaim = UILongPressGestureRecognizer(target: nil, action: nil)
+    /// Claims Pencil touches on the slide's iframes, holding drawing off; see init.
+    private let pencilOnFrame = UILongPressGestureRecognizer(target: nil, action: nil)
     private var pageGesturesKeptFromPencil = Set<ObjectIdentifier>()
 
     /// The page's pinch gesture only exists once WebKit enables zooming, so
@@ -1841,6 +2010,12 @@ extension SlideCanvasView: UIGestureRecognizerDelegate {
     /// The Pencil claim (see init) only exists to hold off the page's pan
     /// and pinch; drawing and the laser pointer go on alongside it.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        gestureRecognizer === pencilClaim
+        gestureRecognizer === pencilClaim || gestureRecognizer === pencilOnFrame
+    }
+
+    /// The iframe claim only takes Pencil touches that land on an iframe.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === pencilOnFrame else { return true }
+        return contentView.isOverFrame(touch.location(in: contentView))
     }
 }
