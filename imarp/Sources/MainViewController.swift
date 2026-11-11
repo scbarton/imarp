@@ -14,6 +14,12 @@ final class MainViewController: UIViewController {
     private var presentButton: UIBarButtonItem?
     private var pointerToggleButton: UIBarButtonItem?
 
+    /// The slide sits under the toolbar, or at the top of the window while
+    /// the toolbar is hidden (View › Hide Buttons, on a Mac).
+    private var canvasBelowToolbar: NSLayoutConstraint!
+    private var canvasAtTop: NSLayoutConstraint!
+    private static let toolbarHiddenKey = "toolbarHidden"
+
     /// URLs currently holding a `startAccessingSecurityScopedResource` claim
     /// for the open deck (see `openDeck(at:accessing:)`), so they can be
     /// released when a different deck is opened.
@@ -53,7 +59,21 @@ final class MainViewController: UIViewController {
     /// view currently holds focus, so no pairing/setup step is needed beyond
     /// plugging the clicker in.
     override var keyCommands: [UIKeyCommand]? {
+        // On a Mac, Esc and the left and right arrows belong to the menu
+        // bar's items (see buildMacMenus); the rest stay here.
+        let onMac = ProcessInfo.processInfo.isiOSAppOnMac
         let escape = UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(slidesTapped))
+        if onMac {
+            guard !slideCanvas.isOverviewOpen else { return [] }
+            return [
+                UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(nextTapped)),
+                UIKeyCommand(input: " ", modifierFlags: [], action: #selector(nextTapped)),
+                UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(previousTapped)),
+            ].map {
+                $0.wantsPriorityOverSystemBehavior = true
+                return $0
+            }
+        }
         // While the slide overview is open, leave the arrow keys to it (they
         // move the selection around its grid) instead of stepping the deck
         // hidden behind it.
@@ -131,11 +151,16 @@ final class MainViewController: UIViewController {
             toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
 
-            slideCanvas.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             slideCanvas.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             slideCanvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             slideCanvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+        canvasBelowToolbar = slideCanvas.topAnchor.constraint(equalTo: toolbar.bottomAnchor)
+        canvasAtTop = slideCanvas.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
+        canvasBelowToolbar.isActive = true
+        if ProcessInfo.processInfo.isiOSAppOnMac, UserDefaults.standard.bool(forKey: Self.toolbarHiddenKey) {
+            setToolbarHidden(true)
+        }
 
         // Fingers use the slide itself: its links and video controls,
         // Marp's own swipe to change slides, and pinch to zoom (the ink
@@ -370,7 +395,7 @@ final class MainViewController: UIViewController {
         UIView.animate(withDuration: 0.4, delay: 1.2, options: []) { self.markLabel.alpha = 0 }
     }
 
-    @objc private func previousTapped() {
+    @objc func previousTapped() {
         DebugLog.write("ipad", "Prev (toolbar button or key)")
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": false])
     }
@@ -378,17 +403,17 @@ final class MainViewController: UIViewController {
     /// Opens (or closes) Marp's slide overview, a grid of every slide; tapping
     /// one jumps there and closes it. Only on the iPad: the external display
     /// stays on the current slide until a new one is picked, then follows.
-    @objc private func slidesTapped() {
+    @objc func slidesTapped() {
         DebugLog.write("ipad", "Slides (toolbar button or Esc): overview \(slideCanvas.isOverviewOpen ? "closing" : "opening")")
         slideCanvas.setOverviewOpen(!slideCanvas.isOverviewOpen)
     }
 
-    @objc private func nextTapped() {
+    @objc func nextTapped() {
         DebugLog.write("ipad", "Next (toolbar button or key)")
         NotificationCenter.default.post(name: .stepRequested, object: nil, userInfo: ["forward": true])
     }
 
-    @objc private func clearTapped() {
+    @objc func clearTapped() {
         let store = PresentationStore.shared
         let index = store.currentIndex
         DebugLog.write("ipad", "Clear: slide \(index), strokes before: \(slideCanvas.canvasView.drawing.strokes.count)")
@@ -433,7 +458,7 @@ final class MainViewController: UIViewController {
     /// The system presents the accessory automatically whenever a display is
     /// attached, so this is a manual override for suppressing it (e.g. to drop
     /// back to mirroring mid-talk) rather than the thing that starts it.
-    @objc private func presentTapped() {
+    @objc func presentTapped() {
         DebugLog.write("ipad", "Present/Mirror")
         guard #available(iOS 27.0, *), let registration = displayRegistration else { return }
         registration.isEnabled.toggle()
@@ -449,7 +474,107 @@ final class MainViewController: UIViewController {
         presentButton?.title = registration.isEnabled ? "Mirror" : "Present"
     }
 
-    @objc private func pointerToggleTapped() {
+    @objc func toggleToolbarTapped() {
+        setToolbarHidden(!toolbar.isHidden)
+    }
+
+    private func setToolbarHidden(_ hidden: Bool) {
+        DebugLog.write("ipad", "toolbar \(hidden ? "hidden" : "shown")")
+        toolbar.isHidden = hidden
+        // Deactivate before activating, so the two are never both on.
+        (hidden ? canvasBelowToolbar : canvasAtTop).isActive = false
+        (hidden ? canvasAtTop : canvasBelowToolbar).isActive = true
+        UserDefaults.standard.set(hidden, forKey: Self.toolbarHiddenKey)
+    }
+
+    // MARK: Mac menu bar
+
+    /// The Mac's menu bar gets an item for every toolbar button (with a
+    /// keyboard shortcut), plus Hide Buttons. Called from AppDelegate's
+    /// buildMenu(with:), on a Mac only. The items reach this controller
+    /// through the responder chain, like the toolbar's buttons.
+    static func buildMacMenus(with builder: UIMenuBuilder) {
+        func item(_ title: String, _ input: String, _ modifiers: UIKeyModifierFlags, _ action: Selector) -> UIKeyCommand {
+            let command = UIKeyCommand(title: title, action: action, input: input, modifierFlags: modifiers)
+            // Plain arrows and Esc would otherwise go to focus movement.
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }
+        func add(_ children: [UIMenuElement], to menu: UIMenu.Identifier, title: String, after: UIMenu.Identifier) {
+            let group = UIMenu(options: .displayInline, children: children)
+            if builder.menu(for: menu) != nil {
+                builder.insertChild(group, atStartOfMenu: menu)
+            } else {
+                builder.insertSibling(UIMenu(title: title, identifier: menu, children: [group]), afterMenu: after)
+            }
+        }
+        // A group whose shortcut clashes with an existing one is dropped
+        // whole, so the system items that would clash go: its Open…
+        // (greyed out, for document apps) has ⌘O, Show Toolbar (for a Mac
+        // toolbar this app doesn't have) ⌥⌘T, and the text styles and Format
+        // menu (nothing here to format) ⌘I for Italic.
+        builder.remove(menu: .open)
+        builder.remove(menu: .toolbar)
+        builder.remove(menu: .textStyle)
+        builder.remove(menu: .format)
+        add([
+            item("Open…", "o", .command, #selector(openTapped)),
+            item("Export PDF…", "e", [.command, .shift], #selector(exportTapped)),
+        ], to: .file, title: "File", after: .application)
+        add([
+            item("Hide Buttons", "t", [.command, .alternate], #selector(toggleToolbarTapped)),
+            item("Hide Ink", "i", .command, #selector(hideAnnotationsTapped)),
+        ], to: .view, title: "View", after: .edit)
+        builder.insertChild(UIMenu(options: .displayInline, children: [
+            item("Clear Ink on Slide", UIKeyCommand.inputDelete, .command, #selector(clearTapped)),
+        ]), atEndOfMenu: .edit)
+        builder.insertSibling(UIMenu(title: "Slideshow", children: [
+            UIMenu(options: .displayInline, children: [
+                item("Present", "p", [.command, .alternate], #selector(presentTapped)),
+                item("Laser Pointer", "l", .command, #selector(pointerToggleTapped)),
+            ]),
+            UIMenu(options: .displayInline, children: [
+                item("Previous Slide", UIKeyCommand.inputLeftArrow, [], #selector(previousTapped)),
+                item("Next Slide", UIKeyCommand.inputRightArrow, [], #selector(nextTapped)),
+                item("Slide Overview", UIKeyCommand.inputEscape, [], #selector(slidesTapped)),
+            ]),
+        ]), afterMenu: .view)
+    }
+
+    /// Keeps the menu items' titles and checkmarks in step with the buttons.
+    override func validate(_ command: UICommand) {
+        super.validate(command)
+        let store = PresentationStore.shared
+        switch command.action {
+        case #selector(toggleToolbarTapped):
+            command.title = toolbar.isHidden ? "Show Buttons" : "Hide Buttons"
+        case #selector(hideAnnotationsTapped):
+            command.title = store.annotationsHidden ? "Show Ink" : "Hide Ink"
+        case #selector(pointerToggleTapped):
+            command.state = store.pointerEnabled ? .on : .off
+        case #selector(slidesTapped):
+            command.state = slideCanvas.isOverviewOpen ? .on : .off
+        case #selector(presentTapped):
+            command.title = presentButton?.title ?? "Present"
+        default:
+            break
+        }
+    }
+
+    /// While the slide overview is open the arrows move around its grid, so
+    /// Previous and Next are off (their keys then reach the overview).
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(previousTapped) || action == #selector(nextTapped) {
+            return !slideCanvas.isOverviewOpen
+        }
+        if action == #selector(presentTapped) {
+            if #available(iOS 27.0, *) { return displayRegistration != nil }
+            return false
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    @objc func pointerToggleTapped() {
         let store = PresentationStore.shared
         store.setPointerEnabled(!store.pointerEnabled)
     }
@@ -492,7 +617,7 @@ final class MainViewController: UIViewController {
         }
     }
 
-    @objc private func hideAnnotationsTapped() {
+    @objc func hideAnnotationsTapped() {
         DebugLog.write("ipad", "Hide/Show Ink")
         let store = PresentationStore.shared
         let hidden = !store.annotationsHidden
@@ -501,7 +626,7 @@ final class MainViewController: UIViewController {
         slideCanvas.annotationsHidden = hidden
     }
 
-    @objc private func openTapped() {
+    @objc func openTapped() {
         // A .marpbundle, or a Markdown deck (see MarpBundleLoader).
         let types = (["marpbundle"] + MarpBundleLoader.markdownExtensions.sorted())
             .compactMap { UTType(filenameExtension: $0) }
@@ -620,12 +745,17 @@ final class MainViewController: UIViewController {
         }
     }
 
-    @objc private func exportTapped() {
+    @objc func exportTapped() {
         PDFExporter.export { [weak self] url in
             guard let self, let url else { return }
             let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
             if let popover = activity.popoverPresentationController {
-                popover.barButtonItem = toolbar.items?.last
+                if toolbar.isHidden {
+                    popover.sourceView = view
+                    popover.sourceRect = CGRect(x: view.bounds.maxX - 40, y: view.safeAreaInsets.top, width: 1, height: 1)
+                } else {
+                    popover.barButtonItem = toolbar.items?.last
+                }
             }
             present(activity, animated: true)
         }

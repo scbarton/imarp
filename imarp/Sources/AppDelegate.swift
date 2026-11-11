@@ -7,6 +7,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
+    /// On a Mac, the menu bar mirrors the toolbar (see
+    /// MainViewController.buildMacMenus). The iPad keeps the system's menus.
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard builder.system == .main, ProcessInfo.processInfo.isiOSAppOnMac else { return }
+        MainViewController.buildMacMenus(with: builder)
+    }
+
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
