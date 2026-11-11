@@ -2,8 +2,9 @@
 # Builds imarp for the iPad and for this Mac (as an iPad app, "Designed for
 # iPad"), so the two never drift apart:
 #
-#   1. iPad: build, then install and launch it if the iPad is reachable (if
-#      it isn't, say so and carry on).
+#   1. iPad: build (for any iPad, so the iPad itself isn't needed), then
+#      install and launch it if the iPad is reachable (if it isn't, say so
+#      and carry on).
 #   2. Mac: build, wrap it the way macOS runs iPad apps (Xcode normally does
 #      this step), and relaunch it from build/dd-mac/iMarp.app.
 #
@@ -34,17 +35,16 @@ build() { # destination, derived data path
     fi
 }
 
-if [ $do_ipad = 1 ] && [ -z "$IPAD_ID" ]; then
-    echo "iPad: skipped, no device ID (put it in tools/ipad-id; see xcrun devicectl list devices)" >&2
-    [ $do_mac = 1 ] || exit 1
-    do_ipad=0
-fi
-
 if [ $do_ipad = 1 ]; then
     echo "iPad: building..."
-    build "id=$IPAD_ID" build/dd || { echo "iPad build failed" >&2; exit 1; }
-    state=$(xcrun devicectl list devices 2>/dev/null | grep "$IPAD_ID" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^(connected|available|unavailable)$/) print $i}')
-    if [ "$state" = "unavailable" ] || [ -z "$state" ]; then
+    build "generic/platform=iOS" build/dd || { echo "iPad build failed" >&2; exit 1; }
+    state=""
+    if [ -n "$IPAD_ID" ]; then
+        state=$(xcrun devicectl list devices 2>/dev/null | grep "$IPAD_ID" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^(connected|available|unavailable)$/) print $i}')
+    fi
+    if [ -z "$IPAD_ID" ]; then
+        echo "iPad: built, not installed (no device ID: put it in tools/ipad-id; see xcrun devicectl list devices)"
+    elif [ "$state" = "unavailable" ] || [ -z "$state" ]; then
         echo "iPad: built, but the iPad isn't reachable (unlock it or replug the cable), not installed"
     else
         if ! xcrun devicectl device install app --device "$IPAD_ID" build/dd/Build/Products/Debug-iphoneos/imarp.app >/dev/null 2>&1; then
