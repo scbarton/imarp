@@ -2,6 +2,9 @@
 imarp.xcodeproj/
 imarp/Resources/Info.plist
 
+# This machine's iPad device ID, read by tools/build.sh
+tools/ipad-id
+
 # Build products
 build/
 DerivedData/
