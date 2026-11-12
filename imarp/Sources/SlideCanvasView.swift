@@ -902,7 +902,12 @@ final class SlideContentView: UIView {
             function isControl(element) {
                 return !!(element && element.closest && element.closest('input, select, textarea, button, label, a[href], summary'));
             }
+            // On a Mac (__imarpOnMac, set by the app in every frame) panning
+            // is the trackpad's scrolling and zooming its pinch, which no
+            // click can get in the way of, so only scrolling is kept from
+            // widgets there, and clicks work their controls as usual.
             function keepFromWidget(event) {
+                if (window.__imarpOnMac && event.type !== 'wheel') { return; }
                 if (zoomed && !isControl(event.target)) { event.stopPropagation(); }
             }
             if (!isTop) {
@@ -981,6 +986,9 @@ final class SlideContentView: UIView {
         if ProcessInfo.processInfo.isiOSAppOnMac {
             configuration.userContentController.addUserScript(
                 WKUserScript(source: "window.__imarpHighlighter = true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: "window.__imarpOnMac = true;", injectionTime: .atDocumentStart, forMainFrameOnly: false)
             )
             // And WebKit's own text selection is off: on the slides it lands
             // in the wrong place, and its double-click word selection flashes
