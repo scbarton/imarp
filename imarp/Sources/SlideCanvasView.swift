@@ -970,11 +970,11 @@ final class SlideContentView: UIView {
             configuration.userContentController.addUserScript(
                 WKUserScript(source: "window.__imarpOnMac = true;", injectionTime: .atDocumentStart, forMainFrameOnly: false)
             )
-            // And WebKit's own text selection is off: on the slides it lands
-            // in the wrong place, and its double-click word selection flashes
-            // blue before the page can clear it.
-            configuration.preferences.isTextInteractionEnabled = false
         }
+        // WebKit's own text selection is off (iPad and Mac): on the slides it
+        // lands in the wrong place, and on a Mac its double-click word
+        // selection flashes blue before the page can clear it.
+        configuration.preferences.isTextInteractionEnabled = false
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.deckHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
