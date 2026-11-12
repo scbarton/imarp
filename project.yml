@@ -46,9 +46,14 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # All four on the iPad, though MainViewController keeps the iPad in
+        # landscape: macOS only lets an iPad app's window be resized if it
+        # supports every orientation (as it would for iPad multitasking).
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: org.powrbox.marpbundle
             UTTypeDescription: imarp Presentation

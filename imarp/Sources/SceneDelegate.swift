@@ -10,6 +10,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = MainViewController()
         window.makeKeyAndVisible()
         self.window = window
+        // On a Mac the window can be resized, down to a small preview of the
+        // slide (with View › Hide Buttons for the smallest).
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            windowScene.sizeRestrictions?.minimumSize = CGSize(width: 320, height: 200)
+        }
         DebugLog.write("ipad", "scene connected")
     }
 

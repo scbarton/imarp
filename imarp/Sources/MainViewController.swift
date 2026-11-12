@@ -96,6 +96,12 @@ final class MainViewController: UIViewController {
         }
     }
 
+    /// Landscape on the iPad, as before. The app declares every orientation
+    /// only so that macOS lets its window be resized (see project.yml).
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        ProcessInfo.processInfo.isiOSAppOnMac ? .all : .landscape
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         // Black, like the slide's letterbox bars, so the strip below the
