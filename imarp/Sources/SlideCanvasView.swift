@@ -296,13 +296,15 @@ final class SlideContentView: UIView {
             });
             // While the page is pinch-zoomed, a one-finger drag should pan,
             // not swipe to another slide: keep touches from Marp's own swipe
-            // handling (WebKit's panning doesn't depend on them). Whether it's
+            // handling (WebKit's panning doesn't depend on them). The same
+            // for a Mac trackpad's two-finger scrolling (wheel events), which
+            // Marp would otherwise also turn into a slide change. Whether it's
             // zoomed comes from the app (__imarpZoomed), which reads WebKit's
             // own zoom: the page's visualViewport.scale can miss its last
             // update after a quick pinch out and stay above 1, which would
             // leave swipes switched off until the next zoom.
             window.__imarpZoomed = false;
-            ['touchstart', 'touchmove', 'touchend'].forEach(function (type) {
+            ['touchstart', 'touchmove', 'touchend', 'wheel'].forEach(function (type) {
                 window.addEventListener(type, function (event) {
                     if (window.__imarpZoomed) {
                         if (type === 'touchstart') {
@@ -836,6 +838,9 @@ final class SlideContentView: UIView {
         webView.scrollView.isScrollEnabled = true
         webView.scrollView.bounces = false
         webView.scrollView.bouncesZoom = false
+        // Panning a zoomed slide goes any way the fingers go, rather than
+        // locking to an axis when it starts straight across or down.
+        webView.scrollView.isDirectionalLockEnabled = false
         // Long-pressing a link shouldn't pop up a preview mid-talk.
         webView.allowsLinkPreview = false
         // Otherwise the page is inset by the window's safe area (overscan on
