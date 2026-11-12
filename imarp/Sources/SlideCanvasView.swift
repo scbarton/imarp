@@ -73,6 +73,7 @@ final class SlideContentView: UIView {
                         // Leaving a slide stops its videos/audio, so sound
                         // never carries on from a slide that's gone.
                         if (window.__imarpPosition && window.__imarpPosition.index !== event.index) {
+                            if (window.__imarpShowHighlight) { window.__imarpShowHighlight(null); }
                             document.querySelectorAll('video, audio').forEach(function (media) { media.pause(); });
                             document.querySelectorAll('[data-imarp-filled]').forEach(function (media) { window.__imarpFill(media, false); });
                         }
@@ -314,6 +315,185 @@ final class SlideContentView: UIView {
                     }
                 }, { capture: true, passive: true });
             });
+            // Highlighter (on a Mac, where __imarpHighlighter is set by the
+            // app before the page loads): a click-and-drag over a slide's text
+            // marks it, like a highlighter pen, on both screens; a plain click
+            // or a change of slide clears it. WebKit's own text selection
+            // can't be used: on Marp's scaled slides it picks up text well
+            // away from the pointer. Here the text under the pointer comes
+            // from caretRangeFromPoint (the same position clicks use, which
+            // is right), and the mark is drawn in the text itself with the
+            // CSS Custom Highlight API, so no position needs converting. The
+            // range is passed to the other screen as paths from the slide's
+            // <svg> to its two ends, which are the same on both screens.
+            var highlightShown = false;
+            var highlightRange = null;
+            // WebKit doesn't repaint text a highlight no longer covers, so the
+            // old mark would linger beside the new one: nudge its text into
+            // repainting.
+            function repaintRange(range) {
+                var element = range && range.commonAncestorContainer;
+                if (element && element.nodeType === 3) { element = element.parentNode; }
+                if (!element || !element.style) { return; }
+                var opacity = element.style.opacity;
+                element.style.opacity = '0.999';
+                requestAnimationFrame(function () { element.style.opacity = opacity; });
+            }
+            function slideSVGs() { return document.querySelectorAll('svg[data-marpit-svg]'); }
+            function pathFrom(root, node) {
+                var path = [];
+                while (node && node !== root) {
+                    var parent = node.parentNode;
+                    if (!parent) { return null; }
+                    path.unshift(Array.prototype.indexOf.call(parent.childNodes, node));
+                    node = parent;
+                }
+                return node === root ? path : null;
+            }
+            function nodeAt(root, path) {
+                var node = root;
+                for (var i = 0; node && i < path.length; i++) { node = node.childNodes[path[i]]; }
+                return node || null;
+            }
+            function ensureHighlightStyle() {
+                if (document.getElementById('imarp-highlight-style') || !document.head) { return; }
+                var style = document.createElement('style');
+                style.id = 'imarp-highlight-style';
+                style.textContent = '::highlight(imarp) { background-color: rgba(255, 221, 0, 0.6); }' +
+                    // WebKit's own selection, cleared as soon as it appears
+                    // on a slide (see the highlighter), shouldn't flash first.
+                    (window.__imarpHighlighter ? ' svg[data-marpit-svg] ::selection { background-color: transparent; }' : '');
+                document.head.appendChild(style);
+            }
+            // Shows a highlight ({ slide, start: [path, offset], end: [path,
+            // offset] }), or clears it (null).
+            window.__imarpShowHighlight = function (mark) {
+                if (!window.CSS || !CSS.highlights || typeof Highlight === 'undefined') { return; }
+                CSS.highlights.delete('imarp');
+                repaintRange(highlightRange);
+                highlightRange = null;
+                if (!mark) {
+                    highlightShown = false;
+                    return;
+                }
+                var root = slideSVGs()[mark.slide];
+                var startNode = root && nodeAt(root, mark.start[0]);
+                var endNode = root && nodeAt(root, mark.end[0]);
+                if (!startNode || !endNode) { return; }
+                var range = document.createRange();
+                try {
+                    range.setStart(startNode, mark.start[1]);
+                    range.setEnd(endNode, mark.end[1]);
+                } catch (error) { return; }
+                ensureHighlightStyle();
+                CSS.highlights.set('imarp', new Highlight(range));
+                highlightRange = range;
+                highlightShown = true;
+            };
+            if (window.__imarpHighlighter) {
+                var marking = null;
+                var caretAt = function (x, y) {
+                    var range = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y);
+                    return range ? [range.startContainer, range.startOffset] : null;
+                };
+                var markBetween = function (svg, a, b) {
+                    if (!svg.contains(a[0]) || !svg.contains(b[0])) { return null; }
+                    var probe = document.createRange();
+                    probe.setStart(a[0], a[1]);
+                    probe.collapse(true);
+                    var order = probe.comparePoint(b[0], b[1]);
+                    if (order === 0) { return null; }
+                    if (order < 0) { var swap = a; a = b; b = swap; }
+                    var startPath = pathFrom(svg, a[0]), endPath = pathFrom(svg, b[0]);
+                    if (!startPath || !endPath) { return null; }
+                    return {
+                        slide: Array.prototype.indexOf.call(slideSVGs(), svg),
+                        start: [startPath, a[1]], end: [endPath, b[1]],
+                    };
+                };
+                // Keep WebKit's own selection off the slides: a mouse press on
+                // a slide's text is cancelled (which is what starts a
+                // selection; presses on links and controls are left alone),
+                // and a selection that appears anyway is cleared. Not with
+                // user-select: none, as WebKit then won't draw the highlight
+                // either.
+                if (document.head) { ensureHighlightStyle(); }
+                else { document.addEventListener('DOMContentLoaded', ensureHighlightStyle); }
+                document.addEventListener('mousedown', function (event) {
+                    if (event.button !== 0 || !onSlide(event.target)) { return; }
+                    if (event.target.closest && event.target.closest(interactiveSelector)) { return; }
+                    event.preventDefault();
+                }, true);
+                var onSlide = function (node) {
+                    var element = node && node.nodeType === 3 ? node.parentNode : node;
+                    return !!(element && element.closest && element.closest('svg[data-marpit-svg]'));
+                };
+                document.addEventListener('selectstart', function (event) {
+                    if (onSlide(event.target)) { event.preventDefault(); }
+                }, true);
+                document.addEventListener('selectionchange', function () {
+                    var selection = document.getSelection();
+                    if (selection && selection.rangeCount && onSlide(selection.anchorNode)) { selection.removeAllRanges(); }
+                });
+                // A double-click highlights the word under it.
+                var lastClick = { at: 0, x: 0, y: 0 };
+                var wordAt = function (caret) {
+                    if (!caret || caret[0].nodeType !== 3) { return null; }
+                    var text = caret[0].data, start = caret[1], end = caret[1];
+                    var isWord = function (c) { return /[\\p{L}\\p{N}_'’-]/u.test(c); };
+                    while (start > 0 && isWord(text[start - 1])) { start--; }
+                    while (end < text.length && isWord(text[end])) { end++; }
+                    return end > start ? [[caret[0], start], [caret[0], end]] : null;
+                };
+                window.addEventListener('pointerdown', function (event) {
+                    marking = null;
+                    if (event.pointerType === 'pen' || event.button !== 0 || window.__imarpOverviewOpen) { return; }
+                    var svg = event.target && event.target.closest && event.target.closest('svg[data-marpit-svg]');
+                    if (!svg) { return; }
+                    marking = { svg: svg, x: event.clientX, y: event.clientY, start: caretAt(event.clientX, event.clientY), moved: false };
+                }, true);
+                window.addEventListener('pointermove', function (event) {
+                    if (!marking || !marking.start) { return; }
+                    if (!marking.moved && Math.abs(event.clientX - marking.x) + Math.abs(event.clientY - marking.y) < 6) { return; }
+                    if (!marking.moved) { pageLog('highlighter: marking (' + event.pointerType + ')'); }
+                    marking.moved = true;
+                    var end = caretAt(event.clientX, event.clientY);
+                    var mark = end && markBetween(marking.svg, marking.start, end);
+                    if (mark) {
+                        window.__imarpShowHighlight(mark);
+                        post('imarpHighlight', mark);
+                    }
+                }, true);
+                var finishMarking = function (event) {
+                    if (marking && !marking.moved && event.type === 'pointerup') {
+                        var now = Date.now();
+                        var second = now - lastClick.at < 450 && Math.abs(event.clientX - lastClick.x) + Math.abs(event.clientY - lastClick.y) < 8;
+                        lastClick = { at: second ? 0 : now, x: event.clientX, y: event.clientY };
+                        var word = second && wordAt(marking.start);
+                        var mark = word && markBetween(marking.svg, word[0], word[1]);
+                        if (mark) {
+                            pageLog('highlighter: word');
+                            window.__imarpShowHighlight(mark);
+                            post('imarpHighlight', mark);
+                        } else if (highlightShown) {
+                            window.__imarpShowHighlight(null);
+                            post('imarpHighlight', null);
+                        }
+                    }
+                    marking = null;
+                };
+                window.addEventListener('pointerup', finishMarking, true);
+                window.addEventListener('pointercancel', function (event) {
+                    if (marking && marking.moved) { pageLog('highlighter: pointer cancelled'); }
+                    finishMarking(event);
+                }, true);
+                // A drag that's marking text isn't a swipe to another slide.
+                ['touchmove', 'touchend'].forEach(function (type) {
+                    window.addEventListener(type, function (event) {
+                        if (marking && marking.moved) { event.stopPropagation(); }
+                    }, { capture: true, passive: true });
+                });
+            }
             // For the log: every finger touch the page gets (start and end
             // only), and the page's own zoom whenever it changes noticeably.
             ['touchstart', 'touchend', 'touchcancel'].forEach(function (type) {
@@ -796,6 +976,17 @@ final class SlideContentView: UIView {
             style.textContent = \(String(reflecting: hideChromeCSS));
             document.head.appendChild(style);
             """
+        // On a Mac, a click-and-drag highlights text (see the highlighter
+        // in the deck hook); the page has to know before it loads.
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: "window.__imarpHighlighter = true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+            // And WebKit's own text selection is off: on the slides it lands
+            // in the wrong place, and its double-click word selection flashes
+            // blue before the page can clear it.
+            configuration.preferences.isTextInteractionEnabled = false
+        }
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.deckHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
@@ -817,6 +1008,7 @@ final class SlideContentView: UIView {
         configuration.userContentController.add(messageProxy, name: "imarpOverview")
         configuration.userContentController.add(messageProxy, name: "imarpMedia")
         configuration.userContentController.add(messageProxy, name: "imarpControl")
+        configuration.userContentController.add(messageProxy, name: "imarpHighlight")
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: frame)
         messageProxy.target = self
@@ -1241,6 +1433,24 @@ final class SlideContentView: UIView {
         onFormInput?(change)
     }
 
+    /// The presenter highlighted text on a slide (on a Mac), or cleared it
+    /// (nil); the payload is opaque, for `showHighlight(_:)` on the other
+    /// screen.
+    var onHighlight: (([String: Any]?) -> Void)?
+
+    fileprivate func highlightReported(_ mark: [String: Any]?) {
+        onHighlight?(mark)
+    }
+
+    func showHighlight(_ mark: [String: Any]?) {
+        var json = "null"
+        if let mark, let data = try? JSONSerialization.data(withJSONObject: mark),
+           let text = String(data: data, encoding: .utf8) {
+            json = text
+        }
+        webView.evaluateJavaScript("window.__imarpShowHighlight && window.__imarpShowHighlight(\(json))")
+    }
+
     fileprivate func controlReported(_ index: Int) {
         log("control \(index) tapped")
         onControlActivated?(index)
@@ -1360,6 +1570,10 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
         }
         if message.name == "imarpInput" {
             if let change = message.body as? [String: Any] { target?.formInputReported(change) }
+            return
+        }
+        if message.name == "imarpHighlight" {
+            target?.highlightReported(message.body as? [String: Any])
             return
         }
         if message.name == "imarpControl" {

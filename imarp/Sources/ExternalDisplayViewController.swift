@@ -79,6 +79,9 @@ final class ExternalDisplayViewController: UIViewController {
             guard let index = note.userInfo?["index"] as? Int else { return }
             self?.slideCanvas.contentView.activateControl(index: index)
         }
+        NotificationCenter.default.addObserver(forName: .highlightChanged, object: nil, queue: .main) { [weak self] note in
+            self?.slideCanvas.contentView.showHighlight(note.userInfo?["mark"] as? [String: Any])
+        }
         NotificationCenter.default.addObserver(forName: .formInputChanged, object: nil, queue: .main) { [weak self] note in
             guard let change = note.userInfo?["change"] as? [String: Any] else { return }
             self?.slideCanvas.contentView.applyFormInput(change)

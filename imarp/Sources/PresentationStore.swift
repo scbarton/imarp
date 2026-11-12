@@ -60,6 +60,10 @@ extension Notification.Name {
     /// on a slide (e.g. a widget's slider, inside an iframe) or clicked a
     /// button inside a slide's iframe, so the external display can do the same.
     static let formInputChanged = Notification.Name("formInputChanged")
+    /// Posted (userInfo["mark"], absent to clear) when the presenter
+    /// highlights text on a slide (on a Mac), so the external display shows
+    /// the same highlight.
+    static let highlightChanged = Notification.Name("highlightChanged")
     /// Posted (userInfo["region"]: NSValue CGRect, normalized to the slide;
     /// absent when back to the whole slide) as the iPad zooms and pans.
     static let slideZoomDidChange = Notification.Name("slideZoomDidChange")

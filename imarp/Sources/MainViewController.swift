@@ -190,6 +190,10 @@ final class MainViewController: UIViewController {
         slideCanvas.contentView.onControlActivated = { index in
             NotificationCenter.default.post(name: .htmlControlActivated, object: nil, userInfo: ["index": index])
         }
+        slideCanvas.contentView.onHighlight = { mark in
+            DebugLog.write("ipad", mark == nil ? "highlight cleared" : "highlight on slide \(mark?["slide"] ?? "?")")
+            NotificationCenter.default.post(name: .highlightChanged, object: nil, userInfo: mark.map { ["mark": $0] })
+        }
         slideCanvas.contentView.onFormInput = { change in
             PresentationStore.shared.recordFormInput(change)
             NotificationCenter.default.post(name: .formInputChanged, object: nil, userInfo: ["change": change])
