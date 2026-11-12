@@ -183,21 +183,23 @@ final class SlideContentView: UIView {
                 }
                 meta.setAttribute('content', 'width=' + width + ', height=' + height + ', initial-scale=1, minimum-scale=1, maximum-scale=5, user-scalable=yes');
             };
-            // Where the current slide's iframes are on screen, in the view's
-            // points, so a Pencil touch on one can work its controls instead
-            // of drawing (see SlideCanvasView.pencilOnFrame). Sent whenever
-            // it changes: slide changes, zoom, pan, resize.
+            // Where the current slide's iframes are on the page, in the
+            // unzoomed view's points (CSS pixels from the page's top left),
+            // so a Pencil touch on one can work its controls instead of
+            // drawing (see SlideCanvasView.pencilOnFrame). The app takes the
+            // zoom out of the touch's position, as the page's own idea of its
+            // pinch zoom (visualViewport) can lag behind or miss updates.
+            // Sent whenever it changes: slide changes, resize.
             var frameRectsSent = '';
             function reportFrameRects() {
-                var vv = window.visualViewport;
-                var scale = vv ? vv.scale : 1, left = vv ? vv.offsetLeft : 0, top = vv ? vv.offsetTop : 0;
+                var scrollX = window.scrollX || 0, scrollY = window.scrollY || 0;
                 var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
                 var rects = [];
                 if (active && !window.__imarpOverviewOpen) {
                     active.querySelectorAll('iframe').forEach(function (frame) {
                         var r = frame.getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) {
-                            rects.push([(r.left - left) * scale, (r.top - top) * scale, r.width * scale, r.height * scale].map(Math.round));
+                            rects.push([r.left + scrollX, r.top + scrollY, r.width, r.height].map(Math.round));
                         }
                     });
                 }
@@ -1388,15 +1390,15 @@ final class SlideContentView: UIView {
         webView.evaluateJavaScript("window.__imarpApplyInput && window.__imarpApplyInput(\(json))")
     }
 
-    /// Where the current slide's iframes are, in this view's points (see
-    /// reportFrameRects in the deck hook).
+    /// Where the current slide's iframes are, in the unzoomed page's points
+    /// (see reportFrameRects in the deck hook).
     private var frameRects: [CGRect] = []
 
     fileprivate func frameRectsReported(_ rects: [[Double]]) {
         frameRects = rects.filter { $0.count == 4 }.map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) }
     }
 
-    /// Whether `point` (in this view's coordinates) is over one of the
+    /// Whether `point` (in the unzoomed page's points) is over one of the
     /// current slide's iframes.
     func isOverFrame(_ point: CGPoint) -> Bool {
         frameRects.contains { $0.contains(point) }
@@ -2235,6 +2237,8 @@ extension SlideCanvasView: UIGestureRecognizerDelegate {
     /// The iframe claim only takes Pencil touches that land on an iframe.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard gestureRecognizer === pencilOnFrame else { return true }
-        return contentView.isOverFrame(touch.location(in: contentView))
+        let location = touch.location(in: canvasView)
+        let zoom = canvasView.zoomScale
+        return contentView.isOverFrame(CGPoint(x: location.x / zoom, y: location.y / zoom))
     }
 }
