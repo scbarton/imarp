@@ -810,18 +810,14 @@ final class SlideContentView: UIView {
             });
             if (isTop) { window.__imarpApplyInput = apply; }
 
-            // While the slide is zoomed in, a pinch or pan has to move the
-            // slide even where it starts on a widget. Plots (Plotly's, for
-            // one) claim touches for their own dragging and mark themselves
-            // touch-action: none, which keeps WebKit from zooming or panning
-            // the page there; on a slide that's mostly plot, that left the
-            // presenter stuck zoomed in. So while zoomed, frames keep touches
-            // away from everything but form controls (sliders still work)
-            // and let the page pan and zoom over them. At normal size, plots
-            // behave as usual. The slideshow page passes the zoom state
-            // (__imarpZoomed, set by the app) down to every frame.
+            // Widgets keep every touch, zoomed in or not: a drag that starts
+            // on a plot works the plot (Plotly claims it for its own dragging
+            // and marks itself touch-action: none), and the slide is panned or
+            // pinched from outside the widget. On a slide that's all widget,
+            // Next, Previous or the overview resets the zoom. The slideshow
+            // page passes the zoom state (__imarpZoomed, set by the app) down
+            // to every frame, for the Mac's scrolling (below).
             var zoomed = false;
-            var zoomStyle = null;
             // In pointer mode the Pencil only moves the dot, so widgets keep
             // its touches away from their controls (__imarpPencilBlocked, set
             // by the app; passed down like the zoom state). Otherwise the
@@ -899,34 +895,18 @@ final class SlideContentView: UIView {
                     if (frame.contentWindow) { frame.contentWindow.postMessage({ imarpPencilBlocked: pencilBlocked }, '*'); }
                 });
             }
-            function isControl(element) {
-                return !!(element && element.closest && element.closest('input, select, textarea, button, label, a[href], summary'));
-            }
-            // On a Mac (__imarpOnMac, set by the app in every frame) panning
-            // is the trackpad's scrolling and zooming its pinch, which no
-            // click can get in the way of, so only scrolling is kept from
-            // widgets there, and clicks work their controls as usual.
-            function keepFromWidget(event) {
-                if (window.__imarpOnMac && event.type !== 'wheel') { return; }
-                if (zoomed && !isControl(event.target)) { event.stopPropagation(); }
+            // On a Mac a zoomed slide pans with the trackpad's scrolling,
+            // which widgets would otherwise take for their own (Plotly zooms
+            // a plot with it), so while zoomed, scrolling is kept from them.
+            // Clicks and drags work their controls as usual.
+            function keepScrollFromWidget(event) {
+                if (zoomed && window.__imarpOnMac) { event.stopPropagation(); }
             }
             if (!isTop) {
-                ['touchstart', 'touchmove', 'touchend', 'pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mousemove', 'mouseup', 'wheel'].forEach(function (type) {
-                    window.addEventListener(type, keepFromWidget, { capture: true, passive: true });
-                });
+                window.addEventListener('wheel', keepScrollFromWidget, { capture: true, passive: true });
             }
             function setZoomed(value) {
                 zoomed = !!value;
-                if (!isTop) {
-                    if (zoomed && !zoomStyle) {
-                        zoomStyle = document.createElement('style');
-                        zoomStyle.textContent = '*:not(input):not(select):not(textarea) { touch-action: auto !important; }';
-                        (document.head || document.documentElement).appendChild(zoomStyle);
-                    } else if (!zoomed && zoomStyle) {
-                        zoomStyle.remove();
-                        zoomStyle = null;
-                    }
-                }
                 frames().forEach(function (frame) {
                     if (frame.contentWindow) { frame.contentWindow.postMessage({ imarpZoomed: zoomed }, '*'); }
                 });
