@@ -763,11 +763,32 @@ final class SlideContentView: UIView {
             // slider's or menu's new position, and the external display
             // applies the same step. Plots can appear any time after load,
             // so they're looked for for a while.
+            // For the log: where a widget's touches land inside it, and what
+            // its Plotly sliders do.
+            function frameLog(text) {
+                var handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.imarpLog;
+                if (handler) { handler.postMessage('widget: ' + text); }
+            }
+            if (!isTop) {
+                ['pointerdown', 'pointerup', 'pointercancel'].forEach(function (type) {
+                    window.addEventListener(type, function (event) {
+                        var target = event.target || {};
+                        var name = (target.tagName || '?').toLowerCase();
+                        var classes = target.getAttribute ? (target.getAttribute('class') || '') : '';
+                        frameLog(type + ' (' + event.pointerType + ') at ' + Math.round(event.clientX) + ',' + Math.round(event.clientY) +
+                            ' on ' + name + (classes ? '.' + classes.split(' ').join('.') : '') +
+                            ', widget ' + window.innerWidth + 'x' + window.innerHeight);
+                    }, true);
+                });
+            }
             function hookPlotly() {
                 document.querySelectorAll('.js-plotly-plot').forEach(function (plot) {
                     if (plot.__imarpHooked || typeof plot.on !== 'function') { return; }
                     plot.__imarpHooked = true;
                     plot.on('plotly_sliderchange', function (event) {
+                        if (event && event.slider) {
+                            frameLog('Plotly slider to step ' + event.slider.steps.indexOf(event.step) + (event.interaction ? ' (presenter)' : ''));
+                        }
                         if (!event || !event.interaction || !event.slider) { return; }
                         var path = elementPath(plot);
                         if (path === null) { return; }
