@@ -190,16 +190,50 @@ final class SlideContentView: UIView {
             // zoom out of the touch's position, as the page's own idea of its
             // pinch zoom (visualViewport) can lag behind or miss updates.
             // Sent whenever it changes: slide changes, resize.
+            //
+            // WebKit gets getBoundingClientRect wrong for anything inside a
+            // slide (Marp scales each slide's <section> inside an SVG
+            // foreignObject, and WebKit applies that scale twice), off by
+            // little in a full-width window but by half in a narrow one. So
+            // each iframe's place is measured in slide units (offsetLeft/Top
+            // up to the slide's section, which are unscaled) and mapped
+            // through the slide's SVG, whose own rectangle WebKit reports
+            // correctly: the SVG letterboxes its viewBox to fit.
             var frameRectsSent = '';
             function reportFrameRects() {
                 var scrollX = window.scrollX || 0, scrollY = window.scrollY || 0;
                 var active = document.querySelector('svg[data-marpit-svg].bespoke-marp-active');
                 var rects = [];
                 if (active && !window.__imarpOverviewOpen) {
+                    var box = active.viewBox && active.viewBox.baseVal;
+                    var svg = active.getBoundingClientRect();
+                    if (!box || !box.width || !box.height) { box = { width: svg.width, height: svg.height }; }
+                    var scale = Math.min(svg.width / box.width, svg.height / box.height);
+                    var originX = svg.left + scrollX + (svg.width - box.width * scale) / 2;
+                    var originY = svg.top + scrollY + (svg.height - box.height * scale) / 2;
                     active.querySelectorAll('iframe').forEach(function (frame) {
-                        var r = frame.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) {
-                            rects.push([r.left + scrollX, r.top + scrollY, r.width, r.height].map(Math.round));
+                        var section = frame.closest('section');
+                        var x = 0, y = 0, element = frame;
+                        while (element && element !== section && section && section.contains(element)) {
+                            x += element.offsetLeft;
+                            y += element.offsetTop;
+                            element = element.offsetParent;
+                        }
+                        // An offset chain that skips the section (it isn't
+                        // positioned) runs past it; then also measure the
+                        // section's own place in the slide.
+                        if (element && element !== section && section) {
+                            var past = element;
+                            element = section;
+                            while (element && element !== past) {
+                                x -= element.offsetLeft;
+                                y -= element.offsetTop;
+                                element = element.offsetParent;
+                            }
+                        }
+                        var width = frame.offsetWidth, height = frame.offsetHeight;
+                        if (width > 0 && height > 0) {
+                            rects.push([originX + x * scale, originY + y * scale, width * scale, height * scale].map(Math.round));
                         }
                     });
                 }
