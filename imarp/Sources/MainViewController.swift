@@ -216,6 +216,12 @@ final class MainViewController: UIViewController {
         // Alongside the page's own touch handling underneath, which would
         // otherwise claim the touch first.
         pencilPointer.delegate = self
+        // Without cancelling the touch for the page: on a widget's control
+        // (a slider, a menu) the Pencil still works it in pointer mode, with
+        // the dot following. Everywhere else the page ignores the Pencil in
+        // pointer mode (see blockPencil in SlideCanvasView's formInputScript),
+        // so it only points.
+        pencilPointer.cancelsTouchesInView = false
         slideCanvas.addGestureRecognizer(pencilPointer)
         // With pointer mode on, the Pencil must never draw or erase. Switching
         // PencilKit's drawing off doesn't stick (it turns its own gesture

@@ -875,16 +875,35 @@ final class SlideContentView: UIView {
             // page passes the zoom state (__imarpZoomed, set by the app) down
             // to every frame, for the Mac's scrolling (below).
             var zoomed = false;
-            // In pointer mode the Pencil only moves the dot, so widgets keep
-            // its touches away from their controls (__imarpPencilBlocked, set
-            // by the app; passed down like the zoom state). Otherwise the
-            // Pencil works a widget's controls like a finger.
+            // In pointer mode the Pencil points (moves the dot), so widgets
+            // keep its touches away from everything but known controls
+            // (__imarpPencilBlocked, set by the app; passed down like the zoom
+            // state): over a plot it only points, where Plotly would take it
+            // for a tap or a drag and zoom, but on a slider, menu, legend,
+            // button or form control it still works the control, with the dot
+            // following. A touch that starts on a control keeps going to it
+            // until the Pencil lifts. With pointer mode off, the Pencil works
+            // a widget like a finger.
             var pencilBlocked = false;
+            var penControl = false;
+            var knownControls = 'input, select, textarea, button, a[href], label, summary, [onclick], ' +
+                '[role=button], [role=slider], [role=checkbox], [role=menuitem], [role=tab], ' +
+                // Plotly's own controls, drawn in SVG.
+                '.slider-container, .updatemenu-container, .legend, .modebar, .rangeslider-container, .rangeselector';
+            function isKnownControl(target) {
+                return !!(target && target.closest && target.closest(knownControls));
+            }
             function blockPencil(event) {
                 if (!pencilBlocked) { return; }
                 var stylus = event.pointerType === 'pen' ||
                     Array.prototype.some.call(event.changedTouches || [], function (t) { return t.touchType === 'stylus'; });
                 if (!stylus) { return; }
+                // Decided as the Pencil lands (pointerdown and touchstart both
+                // come then), and kept until it lands again.
+                if (event.type === 'touchstart' || event.type === 'pointerdown') {
+                    penControl = isKnownControl(event.target);
+                }
+                if (penControl) { return; }
                 event.stopPropagation();
                 if (event.cancelable) { event.preventDefault(); }
             }
@@ -927,11 +946,11 @@ final class SlideContentView: UIView {
             }
             if (!isTop) {
                 window.addEventListener('pointerdown', function (event) {
-                    if (event.pointerType !== 'pen' || pencilBlocked) { return; }
+                    if (event.pointerType !== 'pen' || (pencilBlocked && !isKnownControl(event.target))) { return; }
                     penDown = { x: event.clientX, y: event.clientY, time: Date.now(), target: event.target };
                 }, true);
                 window.addEventListener('pointerup', function (event) {
-                    if (event.pointerType !== 'pen' || !penDown || pencilBlocked) { penDown = null; return; }
+                    if (event.pointerType !== 'pen' || !penDown) { penDown = null; return; }
                     var down = penDown;
                     penDown = null;
                     if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 10 || Date.now() - down.time > 600) { return; }
