@@ -13,7 +13,9 @@ import CoreGraphics
 ///     source.html        cache — regenerated on-device whenever source.md
 ///                        is newer, via MarpRenderer. Never hand-edited.
 ///     theme.css          optional; registered with marp-core by name, same
-///                        convention as marp-cli's --theme-set
+///                        convention as marp-cli's --theme-set. Also found
+///                        named after the deck's theme (chems.css for
+///                        `theme: chems`), and in assets/ (see themeCandidates)
 ///     assets/            images/fonts source.md (and so source.html) refer
 ///                        to locally
 ///     ink/               Apple Pencil annotations, one file per slide index
@@ -36,7 +38,7 @@ import CoreGraphics
 ///   Lecture 8.md         the Markdown
 ///   Lecture 8.html       rendered slides (same rule as source.html)
 ///   Lecture 8.ink/       Apple Pencil annotations
-///   theme.css            optional, as in a bundle
+///   theme.css            optional, as in a bundle (or chems.css, or in assets/)
 ///   assets/              as in a bundle
 ///
 /// Reaching the files beside it needs access to the whole folder, which the
@@ -54,9 +56,9 @@ enum MarpBundleLoader {
         let inkDirectory: URL
         /// For the log: the bundle's or Markdown file's name.
         let name: String
-        /// The files the slides are rendered from (the Markdown and
-        /// theme.css), watched for live reload; empty for a deck that's
-        /// HTML only.
+        /// The files the slides are rendered from (the Markdown and every
+        /// place its theme may be), watched for live reload; empty for a
+        /// deck that's HTML only.
         let sourceFiles: [URL]
     }
 
@@ -64,7 +66,6 @@ enum MarpBundleLoader {
     private struct Layout {
         let markdownURL: URL
         let htmlURL: URL
-        let themeURL: URL
         let deckDirectory: URL
         let inkDirectory: URL
         let name: String
@@ -86,7 +87,6 @@ enum MarpBundleLoader {
             layout = Layout(
                 markdownURL: url,
                 htmlURL: folder.appendingPathComponent("\(name).html"),
-                themeURL: folder.appendingPathComponent("theme.css"),
                 deckDirectory: folder,
                 inkDirectory: folder.appendingPathComponent("\(name).ink", isDirectory: true),
                 name: url.lastPathComponent
@@ -95,7 +95,6 @@ enum MarpBundleLoader {
             layout = Layout(
                 markdownURL: url.appendingPathComponent("source.md"),
                 htmlURL: url.appendingPathComponent("source.html"),
-                themeURL: url.appendingPathComponent("theme.css"),
                 deckDirectory: url,
                 inkDirectory: url.appendingPathComponent("ink", isDirectory: true),
                 name: url.lastPathComponent
@@ -112,7 +111,8 @@ enum MarpBundleLoader {
         // theme is fetched before rendering, and every file the slides refer
         // to (and the files those widget pages load) before showing them.
         DispatchQueue.global(qos: .userInitiated).async {
-            ensureDownloaded([layout.markdownURL, layout.themeURL])
+            ensureDownloaded([layout.markdownURL])
+            ensureDownloaded(themeCandidates(layout))
             DispatchQueue.main.async {
                 load(layout) { result in
                     guard case .success(let contents) = result else {
@@ -208,7 +208,8 @@ enum MarpBundleLoader {
         let cachedHTML = hasHTML ? try? String(contentsOf: layout.htmlURL, encoding: .utf8) : nil
         if hasMarkdown, cachedHTML == nil
             || sourceIsNewer(layout.markdownURL, than: layout.htmlURL)
-            || !builtWithCurrentShell(cachedHTML ?? "") {
+            || !builtWithCurrentShell(cachedHTML ?? "")
+            || themeStamp(in: cachedHTML ?? "") != themeStamp(for: theme(layout), in: layout) {
             renderFromSource(layout, completion: completion)
             return
         }
@@ -228,7 +229,7 @@ enum MarpBundleLoader {
             slideAspectRatio: slideAspectRatio(in: html),
             inkDirectory: layout.inkDirectory,
             name: layout.name,
-            sourceFiles: FileManager.default.fileExists(atPath: layout.markdownURL.path) ? [layout.markdownURL, layout.themeURL] : []
+            sourceFiles: FileManager.default.fileExists(atPath: layout.markdownURL.path) ? [layout.markdownURL] + themeCandidates(layout) : []
         )
     }
 
@@ -237,7 +238,9 @@ enum MarpBundleLoader {
             completion(.failure(LoadError.missingContent))
             return
         }
-        let themeCSS = try? String(contentsOf: layout.themeURL, encoding: .utf8)
+        let themeURL = theme(layout)
+        let themeCSS = themeURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        DebugLog.write("store", "rendering \(layout.name) with theme \(themeURL.map { relativePath(of: $0, in: layout) } ?? "none (Marp's built-in themes only)")")
 
         MarpRenderer.shared.render(markdown: markdown, themeCSS: themeCSS) { result in
             switch result {
@@ -246,7 +249,10 @@ enum MarpBundleLoader {
 
             case .success(let rendered):
                 do {
-                    let assembled = try assemble(html: rendered.html, css: rendered.css)
+                    var assembled = try assemble(html: rendered.html, css: rendered.css)
+                    // Which theme file (and which version of it) this was
+                    // rendered with, so a new or changed theme re-renders.
+                    assembled += "\n<!-- \(themeStamp(for: themeURL, in: layout)) -->\n"
                     try assembled.write(to: layout.htmlURL, atomically: true, encoding: .utf8)
                     completion(.success(contents(layout, html: assembled)))
                 } catch {
@@ -329,6 +335,76 @@ enum MarpBundleLoader {
         return CGFloat(parts[2] / parts[3])
     }
 
+    /// The deck's theme name: `theme:` in the front matter, or Marp's
+    /// `<!-- theme: name -->` directive.
+    private static func themeName(in markdown: String) -> String? {
+        var lines = markdown.components(separatedBy: .newlines)[...]
+        if lines.first?.trimmingCharacters(in: .whitespaces) == "---" {
+            lines = lines.dropFirst()
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "---" { break }
+                if let name = value(of: "theme", in: trimmed) { return name }
+            }
+        }
+        guard let start = markdown.range(of: #"<!--\s*theme\s*:"#, options: .regularExpression),
+              let end = markdown[start.upperBound...].range(of: "-->")
+        else { return nil }
+        return value(of: "theme", in: "theme:" + markdown[start.upperBound..<end.lowerBound])
+    }
+
+    /// `name` from a `key: name` line, without quotes.
+    private static func value(of key: String, in line: String) -> String? {
+        guard line.hasPrefix(key), let colon = line.firstIndex(of: ":"),
+              line[..<colon].trimmingCharacters(in: .whitespaces) == key
+        else { return nil }
+        let value = line[line.index(after: colon)...].trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"'")))
+        return value.isEmpty ? nil : value
+    }
+
+    /// Where the deck's theme may be, in the order they're tried: named
+    /// after the theme (chems.css for `theme: chems`) or theme.css, beside
+    /// the deck and then in its assets folder. The first that exists is
+    /// used; its `@theme` name still has to match the deck's.
+    private static func themeCandidates(_ layout: Layout) -> [URL] {
+        let markdown = (try? String(contentsOf: layout.markdownURL, encoding: .utf8)) ?? ""
+        var names = ["theme.css"]
+        if let name = themeName(in: markdown), !name.contains("/"), name != "theme" {
+            names.insert("\(name).css", at: 0)
+        }
+        let assets = layout.deckDirectory.appendingPathComponent("assets", isDirectory: true)
+        return [layout.deckDirectory, assets].flatMap { directory in
+            names.map { directory.appendingPathComponent($0) }
+        }
+    }
+
+    /// The theme file the deck renders with, if any.
+    private static func theme(_ layout: Layout) -> URL? {
+        themeCandidates(layout).first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static func relativePath(of url: URL, in layout: Layout) -> String {
+        let base = layout.deckDirectory.standardizedFileURL.path + "/"
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base) ? String(path.dropFirst(base.count)) : url.lastPathComponent
+    }
+
+    /// `imarp-theme: <file> <modified>`, or `imarp-theme: none`.
+    private static func themeStamp(for theme: URL?, in layout: Layout) -> String {
+        guard let theme else { return "imarp-theme: none" }
+        let date = (try? FileManager.default.attributesOfItem(atPath: theme.path))?[.modificationDate] as? Date
+        return "imarp-theme: \(relativePath(of: theme, in: layout)) \(Int(date?.timeIntervalSince1970 ?? 0))"
+    }
+
+    /// The theme stamp a rendered page was saved with (none before this
+    /// was added, so those re-render once).
+    private static func themeStamp(in html: String) -> String? {
+        guard let start = html.range(of: "<!-- imarp-theme: ", options: .backwards),
+              let end = html[start.upperBound...].range(of: " -->")
+        else { return nil }
+        return "imarp-theme: " + html[start.upperBound..<end.lowerBound]
+    }
+
     private static func sourceIsNewer(_ source: URL, than rendered: URL) -> Bool {
         let fm = FileManager.default
         guard let sourceDate = try? fm.attributesOfItem(atPath: source.path)[.modificationDate] as? Date,
@@ -341,7 +417,7 @@ enum MarpBundleLoader {
 }
 
 /// Live reload: while a deck is open, checks its source files (the Markdown
-/// and theme.css) every couple of seconds and calls `onChange` when one has
+/// and its theme) every couple of seconds and calls `onChange` when one has
 /// changed, whether it was saved on this device or the change came in
 /// through iCloud. A newer version iCloud knows about but hasn't downloaded
 /// yet is asked for first, and reported once it's here. Polling rather than
